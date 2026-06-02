@@ -98,10 +98,28 @@ pub fn branch_vs_base(repo_path: &Path, base: &str) -> Result<DiffSummary> {
     let merge_base = repo.merge_base(base_commit.id(), head_commit.id())?;
     let base_tree = repo.find_commit(merge_base)?.tree()?;
     let head_tree = head_commit.tree()?;
+    let head_label = head_commit
+        .as_object()
+        .short_id()?
+        .as_str()
+        .unwrap_or("")
+        .to_string();
 
+    build_diff_summary(&repo, Some(&base_tree), Some(&head_tree), base, &head_label)
+}
+
+/// Build a [`DiffSummary`] from two trees (either may be `None` for the empty
+/// tree). Shared by [`branch_vs_base`] and the per-commit timeline.
+pub fn build_diff_summary(
+    repo: &Repository,
+    old_tree: Option<&git2::Tree>,
+    new_tree: Option<&git2::Tree>,
+    base: &str,
+    head: &str,
+) -> Result<DiffSummary> {
     let mut opts = git2::DiffOptions::new();
     opts.context_lines(3);
-    let mut diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))?;
+    let mut diff = repo.diff_tree_to_tree(old_tree, new_tree, Some(&mut opts))?;
     // Detect renames so they show up as Renamed rather than add+delete.
     diff.find_similar(None)?;
 
@@ -173,7 +191,7 @@ pub fn branch_vs_base(repo_path: &Path, base: &str) -> Result<DiffSummary> {
 
     Ok(DiffSummary {
         base: base.to_string(),
-        head: head_commit.as_object().short_id()?.as_str().unwrap_or("").to_string(),
+        head: head.to_string(),
         files,
         total_additions,
         total_deletions,

@@ -37,13 +37,13 @@ impl AnthropicNarrator {
         self
     }
 
-    pub async fn narrate(&self, diff: &DiffSummary) -> Result<Narration> {
-        let prompt = build_prompt(diff);
+    /// One-shot completion: send a system + user prompt, return assistant text.
+    async fn complete(&self, system: &str, user: &str, max_tokens: u32) -> Result<String> {
         let body = json!({
             "model": self.model,
-            "max_tokens": 1024,
-            "system": SYSTEM_PROMPT,
-            "messages": [{ "role": "user", "content": prompt }],
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{ "role": "user", "content": user }],
         });
 
         let client = reqwest::Client::new();
@@ -68,8 +68,26 @@ impl AnthropicNarrator {
 
         let api_json: Value = serde_json::from_str(&text)
             .map_err(|e| QuayError::Narrator(format!("invalid API json: {e}")))?;
-        let content = extract_text(&api_json)?;
+        extract_text(&api_json)
+    }
+
+    pub async fn narrate(&self, diff: &DiffSummary) -> Result<Narration> {
+        let content = self.complete(SYSTEM_PROMPT, &build_prompt(diff), 1024).await?;
         parse_narration(&content)
+    }
+
+    /// Generate a concise conventional-commit message for the diff.
+    pub async fn commit_message(&self, diff: &DiffSummary) -> Result<String> {
+        let content = self.complete(COMMIT_SYSTEM, &build_prompt(diff), 256).await?;
+        Ok(clean_commit_message(&content))
+    }
+
+    /// Answer a free-form question about the diff (the "ask Haiku" feature).
+    pub async fn ask(&self, diff: &DiffSummary, question: &str) -> Result<String> {
+        let content = self
+            .complete(ASK_SYSTEM, &build_ask_prompt(diff, question), 1024)
+            .await?;
+        Ok(content.trim().to_string())
     }
 }
 
@@ -79,6 +97,49 @@ restatement. Group related edits by intent, flag anything risky, and keep it con
 Respond with ONLY a JSON object, no prose, no markdown fences, matching this shape: \
 {\"summary\": string, \"clusters\": [{\"title\": string, \"description\": string, \"files\": [string]}], \
 \"file_notes\": [{\"path\": string, \"note\": string}], \"risks\": [string]}";
+
+const COMMIT_SYSTEM: &str = "You write git commit messages. Given a diff, respond with ONLY a \
+commit message: a concise imperative subject line (<= 72 chars), optionally followed by a blank \
+line and a short body explaining the why. No quotes, no markdown fences, no preamble.";
+
+const ASK_SYSTEM: &str = "You are a senior engineer answering a question about a specific code \
+diff. Answer concisely and concretely, referring to the actual changes. If the diff doesn't \
+contain the answer, say so.";
+
+/// Clean a model-produced commit message: strip markdown fences, surrounding
+/// quotes, and any "Subject:"-style preamble; trim trailing whitespace.
+pub fn clean_commit_message(text: &str) -> String {
+    let mut s = text.trim();
+    // Strip a leading/trailing ``` fence if present.
+    if let Some(rest) = s.strip_prefix("```") {
+        s = rest;
+        if let Some(nl) = s.find('\n') {
+            s = &s[nl + 1..];
+        }
+        if let Some(end) = s.rfind("```") {
+            s = &s[..end];
+        }
+        s = s.trim();
+    }
+    // Strip wrapping quotes around a single-line message.
+    if !s.contains('\n') && s.len() >= 2 {
+        let bytes = s.as_bytes();
+        let q = bytes[0];
+        if (q == b'"' || q == b'\'') && bytes[bytes.len() - 1] == q {
+            s = &s[1..s.len() - 1];
+        }
+    }
+    s.trim().to_string()
+}
+
+/// Build the prompt for a question about a diff.
+pub fn build_ask_prompt(diff: &DiffSummary, question: &str) -> String {
+    format!(
+        "Question: {}\n\n--- diff ---\n{}",
+        question.trim(),
+        build_prompt(diff)
+    )
+}
 
 /// Build the user prompt: a compact, structured rendering of the diff,
 /// truncated so it can't exceed a sane size.
@@ -334,6 +395,27 @@ mod tests {
     #[test]
     fn parse_fails_without_json() {
         assert!(parse_narration("no json here").is_err());
+    }
+
+    #[test]
+    fn clean_commit_message_strips_fences_and_quotes() {
+        assert_eq!(clean_commit_message("  Add login flow  "), "Add login flow");
+        assert_eq!(clean_commit_message("\"Add login flow\""), "Add login flow");
+        assert_eq!(
+            clean_commit_message("```\nAdd login flow\n```"),
+            "Add login flow"
+        );
+        // Multi-line body is preserved (quotes only stripped for single line).
+        let multi = "Add login flow\n\nIntroduces token minting.";
+        assert_eq!(clean_commit_message(multi), multi);
+    }
+
+    #[test]
+    fn build_ask_prompt_includes_question_and_diff() {
+        let p = build_ask_prompt(&sample_diff(), "  why mint a token?  ");
+        assert!(p.contains("Question: why mint a token?"));
+        assert!(p.contains("src/auth.rs"));
+        assert!(p.contains("--- diff ---"));
     }
 
     #[test]

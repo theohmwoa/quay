@@ -8,10 +8,15 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::error::{QuayError, Result};
+use crate::scrollback::ScrollbackBuffer;
+
+/// Per-terminal scrollback retained for reattach/replay (256 KiB).
+const SCROLLBACK_CAP: usize = 256 * 1024;
 
 /// A live PTY: holds the master side, the child process, and a writer.
 ///
@@ -22,6 +27,7 @@ pub struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    scrollback: Arc<Mutex<ScrollbackBuffer>>,
 }
 
 fn pty_err<E: std::fmt::Display>(e: E) -> QuayError {
@@ -62,6 +68,9 @@ pub fn spawn(
     let mut reader = pair.master.try_clone_reader().map_err(pty_err)?;
     let writer = pair.master.take_writer().map_err(pty_err)?;
 
+    let scrollback = Arc::new(Mutex::new(ScrollbackBuffer::new(SCROLLBACK_CAP)));
+    let scrollback_writer = Arc::clone(&scrollback);
+
     let (tx, rx) = channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
@@ -69,7 +78,11 @@ pub fn spawn(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
+                    let chunk = &buf[..n];
+                    if let Ok(mut sb) = scrollback_writer.lock() {
+                        sb.push(chunk);
+                    }
+                    if tx.send(chunk.to_vec()).is_err() {
                         break;
                     }
                 }
@@ -83,6 +96,7 @@ pub fn spawn(
             master: pair.master,
             writer,
             child,
+            scrollback,
         },
         rx,
     ))
@@ -110,6 +124,14 @@ impl PtyHandle {
     /// Terminate the child process.
     pub fn kill(&mut self) -> Result<()> {
         self.child.kill().map_err(QuayError::Io)
+    }
+
+    /// Snapshot of recent output for reattach/replay (oldest byte first).
+    pub fn scrollback(&self) -> Vec<u8> {
+        self.scrollback
+            .lock()
+            .map(|sb| sb.snapshot())
+            .unwrap_or_default()
     }
 
     /// Non-blocking check of whether the child has exited.
@@ -184,5 +206,25 @@ mod tests {
         let dir = std::env::temp_dir();
         let (handle, _rx) = spawn(&dir, "cat", &[], 80, 24).unwrap();
         assert!(handle.resize(120, 40).is_ok());
+    }
+
+    #[test]
+    fn scrollback_captures_output_for_replay() {
+        let dir = std::env::temp_dir();
+        let (handle, rx) = spawn(
+            &dir,
+            "sh",
+            &["-c".into(), "printf quay-replay-marker".into()],
+            80,
+            24,
+        )
+        .unwrap();
+        // Drain so the reader thread has processed the output.
+        let _ = collect(&rx, 2000);
+        let replay = String::from_utf8_lossy(&handle.scrollback()).into_owned();
+        assert!(
+            replay.contains("quay-replay-marker"),
+            "scrollback should retain output for reattach, got: {replay:?}"
+        );
     }
 }

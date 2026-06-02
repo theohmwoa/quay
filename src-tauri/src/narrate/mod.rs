@@ -76,6 +76,20 @@ impl AnyNarrator {
             AnyNarrator::Anthropic(a) => a.narrate(diff).await,
         }
     }
+
+    pub async fn commit_message(&self, diff: &DiffSummary) -> Result<String> {
+        match self {
+            AnyNarrator::Mock(m) => Ok(m.commit_message(diff)),
+            AnyNarrator::Anthropic(a) => a.commit_message(diff).await,
+        }
+    }
+
+    pub async fn ask(&self, diff: &DiffSummary, question: &str) -> Result<String> {
+        match self {
+            AnyNarrator::Mock(m) => Ok(m.ask(diff, question)),
+            AnyNarrator::Anthropic(a) => a.ask(diff, question).await,
+        }
+    }
 }
 
 /// Deterministic, offline narrator. Groups changes by top-level directory and
@@ -131,6 +145,69 @@ impl MockNarrator {
             risks: detect_risks(diff),
             engine: "mock".to_string(),
         }
+    }
+}
+
+impl MockNarrator {
+    /// Deterministic conventional-commit message derived from the diff.
+    pub fn commit_message(&self, diff: &DiffSummary) -> String {
+        if diff.files.is_empty() {
+            return "Update working tree".to_string();
+        }
+        let all_added = diff.files.iter().all(|f| f.status == FileStatus::Added);
+        let all_deleted = diff.files.iter().all(|f| f.status == FileStatus::Deleted);
+        let verb = if all_added {
+            "Add"
+        } else if all_deleted {
+            "Remove"
+        } else {
+            "Update"
+        };
+
+        // A single shared top-level directory becomes the scope.
+        let dirs: std::collections::BTreeSet<String> =
+            diff.files.iter().map(|f| top_dir(&f.path)).collect();
+        let scope = if dirs.len() == 1 {
+            let d = dirs.into_iter().next().unwrap();
+            if d == "(root)" {
+                String::new()
+            } else {
+                format!(" in {d}")
+            }
+        } else {
+            String::new()
+        };
+
+        let subject = if diff.files.len() == 1 {
+            format!("{verb} {}", diff.files[0].path)
+        } else {
+            format!("{verb} {} files{scope}", diff.files.len())
+        };
+
+        // Body: one bullet per file (capped), for context.
+        let mut body = String::new();
+        for f in diff.files.iter().take(10) {
+            body.push_str(&format!("\n- {}", describe_file(f)));
+        }
+        if diff.files.len() > 10 {
+            body.push_str(&format!("\n- … and {} more", diff.files.len() - 10));
+        }
+        format!("{subject}\n{body}")
+    }
+
+    /// Offline answer to a question about the diff. Can't truly reason, but
+    /// returns useful, deterministic context so the feature degrades gracefully.
+    pub fn ask(&self, diff: &DiffSummary, question: &str) -> String {
+        let files: Vec<&str> = diff.files.iter().map(|f| f.path.as_str()).collect();
+        format!(
+            "(offline narrator — set ANTHROPIC_API_KEY for real answers)\n\nQuestion: {}\n\nThe diff against {} changes {} file(s) (+{} / -{}): {}.",
+            question.trim(),
+            diff.base,
+            diff.files.len(),
+            diff.total_additions,
+            diff.total_deletions,
+            files.join(", ")
+        )
     }
 }
 
@@ -243,6 +320,50 @@ mod tests {
         let a = MockNarrator.narrate(&sample());
         let b = MockNarrator.narrate(&sample());
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn mock_commit_message_picks_verb_and_scope() {
+        // All-added under a single dir -> "Add N files in src".
+        let all_added = DiffSummary {
+            base: "main".into(),
+            head: "h".into(),
+            files: vec![
+                file("src/a.rs", FileStatus::Added, 5, 0),
+                file("src/b.rs", FileStatus::Added, 3, 0),
+            ],
+            total_additions: 8,
+            total_deletions: 0,
+        };
+        let msg = MockNarrator.commit_message(&all_added);
+        assert!(msg.starts_with("Add 2 files in src"), "got: {msg}");
+        assert!(msg.contains("- Added src/a.rs"));
+
+        // Single file -> "Update <path>".
+        let one = DiffSummary {
+            base: "main".into(),
+            head: "h".into(),
+            files: vec![file("README.md", FileStatus::Modified, 1, 1)],
+            total_additions: 1,
+            total_deletions: 1,
+        };
+        assert!(MockNarrator.commit_message(&one).starts_with("Update README.md"));
+    }
+
+    #[test]
+    fn mock_commit_message_is_deterministic() {
+        let d = sample();
+        assert_eq!(MockNarrator.commit_message(&d), MockNarrator.commit_message(&d));
+    }
+
+    #[test]
+    fn mock_ask_is_deterministic_and_mentions_files() {
+        let d = sample();
+        let a = MockNarrator.ask(&d, "what changed?");
+        let b = MockNarrator.ask(&d, "what changed?");
+        assert_eq!(a, b);
+        assert!(a.contains("src/auth.rs"));
+        assert!(a.contains("what changed?"));
     }
 
     #[test]
