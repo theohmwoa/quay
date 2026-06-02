@@ -13,6 +13,9 @@ mod pty;
 #[cfg(test)]
 mod testutil;
 
+#[cfg(test)]
+mod integration_tests;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};

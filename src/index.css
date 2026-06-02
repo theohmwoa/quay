@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   quay theme — squared, editorial, restrained. One signal color (amber) for
+   "alive" state; diff semantics get desaturated green/red. Everything else is
+   a calm zinc neutral scale.
+--------------------------------------------------------------------------- */
+@theme {
+  --color-bg: #0b0b0d;
+  --color-panel: #131316;
+  --color-panel-2: #17171b;
+  --color-border: #26262b;
+  --color-border-strong: #34343a;
+  --color-fg: #e7e7ea;
+  --color-fg-muted: #9a9aa3;
+  --color-fg-subtle: #6b6b73;
+  --color-accent: #c8a978;
+  --color-accent-dim: #6f5e44;
+  --color-add: #4a9d6a;
+  --color-add-bg: #11261a;
+  --color-del: #c2554d;
+  --color-del-bg: #2a1514;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --radius: 3px;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Thin, unobtrusive scrollbars — editorial restraint. */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 0;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* xterm fills its container. */
+.xterm,
+.xterm-viewport {
+  height: 100% !important;
+}
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+}
