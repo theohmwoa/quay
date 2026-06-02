@@ -11,12 +11,19 @@ import {
 import { AgentDeck } from "./components/AgentDeck";
 import { NarratedDiff } from "./components/NarratedDiff";
 import { TerminalView } from "./components/TerminalView";
-
-type View = "terminal" | "diff";
-type Program = "shell" | "claude";
+import {
+  commandFor,
+  isSessionActive,
+  sessionKey,
+  upsertSession,
+  type Program,
+  type Session,
+  type View,
+} from "./lib/sessions";
 
 const LS_REPO = "quay.repoPath";
 const LS_BASE = "quay.base";
+const NO_ARGS: string[] = [];
 
 function App() {
   const [repoPath, setRepoPath] = useState(() => localStorage.getItem(LS_REPO) ?? "");
@@ -27,6 +34,10 @@ function App() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [view, setView] = useState<View>("terminal");
   const [program, setProgram] = useState<Program>("shell");
+
+  // Every terminal the user has opened stays mounted (and its PTY alive) so
+  // switching view/program/worktree never kills a running session.
+  const [sessions, setSessions] = useState<Session[]>([]);
 
   const [diff, setDiff] = useState<DiffSummary | null>(null);
   const [narration, setNarration] = useState<Narration | null>(null);
@@ -53,6 +64,13 @@ function App() {
   useEffect(() => {
     void refreshWorktrees();
   }, [refreshWorktrees]);
+
+  // Lazily open (and thereafter keep) a terminal session for the active
+  // worktree + program once the terminal view is shown for it.
+  useEffect(() => {
+    if (view !== "terminal" || !selectedPath) return;
+    setSessions((prev) => upsertSession(prev, selectedPath, program));
+  }, [view, selectedPath, program]);
 
   // Load the narrated diff whenever the diff view is shown for a selection.
   useEffect(() => {
@@ -90,8 +108,8 @@ function App() {
       setNewName("");
       await refreshWorktrees();
       setSelectedPath(wt.path);
-      setView("terminal");
       setProgram("claude");
+      setView("terminal");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -100,7 +118,7 @@ function App() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-[var(--color-bg)] text-[var(--color-fg)]">
+    <div className="relative flex h-full flex-col bg-[var(--color-bg)] text-[var(--color-fg)]">
       {/* Top bar */}
       <header className="flex items-center gap-3 border-b border-[var(--color-border)] px-3 py-2">
         <span className="font-mono text-[13px] font-semibold tracking-tight text-[var(--color-accent)]">
@@ -201,20 +219,38 @@ function App() {
                 </div>
               )}
 
-              <div className="min-h-0 flex-1">
-                {view === "terminal" ? (
-                  <TerminalView
-                    cwd={selectedPath}
-                    command={program === "claude" ? "claude" : "zsh"}
-                    args={[]}
-                    sessionKey={`${selectedPath}:${program}`}
-                  />
-                ) : diffLoading ? (
-                  <Empty>Computing diff against {base}…</Empty>
-                ) : diff && narration ? (
-                  <NarratedDiff diff={diff} narration={narration} />
-                ) : (
-                  <Empty>No diff to show.</Empty>
+              {/* Stage: terminals stay mounted; the diff view overlays them. */}
+              <div className="relative min-h-0 flex-1">
+                {sessions.map((s) => {
+                  const key = sessionKey(s.path, s.program);
+                  const active = isSessionActive(s, view, selectedPath, program);
+                  return (
+                    <div
+                      key={key}
+                      className="absolute inset-0"
+                      style={{ display: active ? "block" : "none" }}
+                    >
+                      <TerminalView
+                        cwd={s.path}
+                        command={commandFor(s.program)}
+                        args={NO_ARGS}
+                        sessionKey={key}
+                        interactive={active && !showNew}
+                      />
+                    </div>
+                  );
+                })}
+
+                {view === "diff" && (
+                  <div className="absolute inset-0 bg-[var(--color-bg)]">
+                    {diffLoading ? (
+                      <Empty>Computing diff against {base}…</Empty>
+                    ) : diff && narration ? (
+                      <NarratedDiff diff={diff} narration={narration} />
+                    ) : (
+                      <Empty>No diff to show.</Empty>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -240,7 +276,10 @@ function App() {
               autoFocus
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void submitNewAgent()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitNewAgent();
+                if (e.key === "Escape") setShowNew(false);
+              }}
               placeholder="what is this agent working on?"
               className="mb-3 w-full rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1.5 text-[13px] outline-none focus:border-[var(--color-accent-dim)]"
             />

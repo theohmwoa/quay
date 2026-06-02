@@ -18,8 +18,14 @@ interface Props {
   /** Program to run, e.g. "claude" or the shell. */
   command: string;
   args: string[];
-  /** Stable key so a new terminal is created per agent/worktree. */
+  /** Stable key; one PTY exists per session for its whole lifetime. */
   sessionKey: string;
+  /**
+   * Whether this terminal should accept keyboard input and hold focus. Only
+   * the visible, unobstructed terminal is interactive — hidden ones and any
+   * terminal behind a modal are not, so keystrokes never leak.
+   */
+  interactive: boolean;
 }
 
 const THEME = {
@@ -32,13 +38,19 @@ const THEME = {
 };
 
 /**
- * A live terminal bound to a PTY running `command` in `cwd`. Self-contained:
- * spawns on mount, wires xterm <-> the Rust PTY, and tears everything down on
- * unmount or when `sessionKey` changes.
+ * A live terminal bound to a PTY running `command` in `cwd`. The PTY is
+ * spawned once (keyed by `sessionKey`) and survives view/program switches —
+ * the parent keeps this component mounted and merely hides it — so a running
+ * Claude session is never lost. The PTY is only killed when this component is
+ * truly unmounted (the session is closed or the app exits).
  */
-export function TerminalView({ cwd, command, args, sessionKey }: Props) {
+export function TerminalView({ cwd, command, args, sessionKey, interactive }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
 
+  // Spawn + wiring. Keyed on sessionKey only: cwd/command/args are constant
+  // for a given session, so this runs exactly once per terminal.
   useEffect(() => {
     let disposed = false;
     let ptyId: string | null = null;
@@ -53,11 +65,17 @@ export function TerminalView({ cwd, command, args, sessionKey }: Props) {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    termRef.current = term;
+    fitRef.current = fit;
 
     const el = containerRef.current;
     if (el) {
       term.open(el);
-      fit.fit();
+      try {
+        fit.fit();
+      } catch {
+        /* not measurable yet */
+      }
     }
 
     (async () => {
@@ -66,7 +84,6 @@ export function TerminalView({ cwd, command, args, sessionKey }: Props) {
         const rows = term.rows || 24;
         const id = await ptySpawn(cwd, command, args, cols, rows);
         if (disposed) {
-          // Unmounted before spawn resolved — clean up the orphan.
           void ptyKill(id);
           return;
         }
@@ -90,7 +107,7 @@ export function TerminalView({ cwd, command, args, sessionKey }: Props) {
         fit.fit();
         if (ptyId) void ptyResize(ptyId, term.cols, term.rows);
       } catch {
-        /* container not measurable yet */
+        /* container not measurable (e.g. hidden) */
       }
     };
     const ro = new ResizeObserver(onResize);
@@ -102,8 +119,32 @@ export function TerminalView({ cwd, command, args, sessionKey }: Props) {
       unlisteners.forEach((u) => u());
       if (ptyId) void ptyKill(ptyId);
       term.dispose();
+      termRef.current = null;
+      fitRef.current = null;
     };
-  }, [cwd, command, args, sessionKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey]);
+
+  // Toggle interactivity: disable stdin and blur when this terminal is hidden
+  // or sitting behind a modal; re-enable, refit and focus when it's active.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.disableStdin = !interactive;
+    if (interactive) {
+      // Becoming visible/active: re-measure (it may have been hidden) and focus.
+      requestAnimationFrame(() => {
+        try {
+          fitRef.current?.fit();
+        } catch {
+          /* not measurable */
+        }
+        term.focus();
+      });
+    } else {
+      term.blur();
+    }
+  }, [interactive]);
 
   return <div ref={containerRef} className="h-full w-full px-2 py-1" />;
 }
