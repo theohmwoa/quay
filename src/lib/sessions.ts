@@ -1,7 +1,7 @@
 // Terminal-session bookkeeping — the rules that keep PTYs alive across
 // view/program/worktree switches. Pure and unit-tested; App holds the state.
 
-export type View = "terminal" | "diff";
+export type View = "terminal" | "diff" | "timeline" | "ask";
 export type Program = "shell" | "claude";
 
 /** A live terminal: one PTY per (worktree path, program). */

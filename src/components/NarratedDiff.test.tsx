@@ -72,6 +72,8 @@ describe("NarratedDiff", () => {
     const occurrences = screen.getAllByText("auth.rs");
     fireEvent.click(occurrences[occurrences.length - 1]);
     expect(screen.getByText("@@ -1,3 +1,4 @@")).toBeInTheDocument();
-    expect(screen.getByText("let token = mint();")).toBeInTheDocument();
+    // The line is syntax-highlighted (split into tokens), so match the
+    // non-keyword remainder of `let token = mint();`.
+    expect(screen.getByText(/token = mint/)).toBeInTheDocument();
   });
 });

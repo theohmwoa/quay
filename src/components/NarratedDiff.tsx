@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { DiffFile, DiffSummary, Narration } from "../lib/api";
 import {
   basename,
@@ -8,20 +8,41 @@ import {
   statusBadge,
   statusColor,
 } from "../lib/format";
+import { highlightLine, type TokenKind } from "../lib/highlight";
 
 interface Props {
   diff: DiffSummary;
   narration: Narration;
+  /** Optional reviewer notes per file path. */
+  notes?: Record<string, string>;
+  onNote?: (path: string, note: string) => void;
 }
 
 /**
- * The "understand what happened" view: a narrated change review, not a raw
- * git diff. Summary + intent clusters + risks up top; per-file notes with the
- * raw hunks one click away.
+ * The "understand what happened" view: a narrated change review with intent
+ * clusters, risks, per-file notes, syntax-highlighted hunks, per-file
+ * navigation, and reviewer notes.
  */
-export function NarratedDiff({ diff, narration }: Props) {
+export function NarratedDiff({ diff, narration, notes, onNote }: Props) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const navIndex = useRef(0);
+
   const noteFor = (path: string) =>
     narration.file_notes.find((n) => n.path === path)?.note;
+
+  const toggle = (path: string) =>
+    setExpanded((e) => ({ ...e, [path]: !e[path] }));
+
+  // Jump to the next/previous file, expanding and scrolling it into view.
+  const navigate = (dir: 1 | -1) => {
+    if (diff.files.length === 0) return;
+    navIndex.current =
+      (navIndex.current + dir + diff.files.length) % diff.files.length;
+    const file = diff.files[navIndex.current];
+    setExpanded((e) => ({ ...e, [file.path]: true }));
+    rowRefs.current[file.path]?.scrollIntoView({ block: "center" });
+  };
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
@@ -91,12 +112,45 @@ export function NarratedDiff({ diff, narration }: Props) {
 
       {/* Files */}
       <section className="px-5 py-4">
-        <h2 className="mb-3 text-[11px] uppercase tracking-wider text-[var(--color-fg-subtle)]">
-          {diff.files.length} file{diff.files.length === 1 ? "" : "s"}
-        </h2>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-[11px] uppercase tracking-wider text-[var(--color-fg-subtle)]">
+            {diff.files.length} file{diff.files.length === 1 ? "" : "s"}
+          </h2>
+          {diff.files.length > 1 && (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                title="Previous change"
+                onClick={() => navigate(-1)}
+                className="rounded-[var(--radius)] border border-[var(--color-border)] px-1.5 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                title="Next change"
+                onClick={() => navigate(1)}
+                className="rounded-[var(--radius)] border border-[var(--color-border)] px-1.5 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+              >
+                ↓
+              </button>
+            </div>
+          )}
+        </div>
         <div className="space-y-1.5">
           {diff.files.map((f) => (
-            <FileRow key={f.path} file={f} note={noteFor(f.path)} />
+            <FileRow
+              key={f.path}
+              ref={(el) => {
+                rowRefs.current[f.path] = el;
+              }}
+              file={f}
+              note={noteFor(f.path)}
+              open={!!expanded[f.path]}
+              onToggle={() => toggle(f.path)}
+              reviewNote={notes?.[f.path] ?? ""}
+              onReviewNote={onNote ? (v) => onNote(f.path, v) : undefined}
+            />
           ))}
         </div>
       </section>
@@ -120,14 +174,59 @@ function EngineBadge({ engine }: { engine: string }) {
   );
 }
 
-function FileRow({ file, note }: { file: DiffFile; note?: string }) {
-  const [open, setOpen] = useState(false);
+const TOKEN_CLASS: Record<TokenKind, string> = {
+  plain: "",
+  keyword: "text-[var(--color-accent)]",
+  string: "text-[#7fae8a]",
+  comment: "italic text-[var(--color-fg-subtle)]",
+  number: "text-[#c69a6a]",
+};
+
+/** Render a code line with lightweight syntax highlighting. */
+function Highlighted({ content }: { content: string }) {
+  return (
+    <span className="whitespace-pre">
+      {highlightLine(content).map((t, i) =>
+        t.kind === "plain" ? (
+          <span key={i}>{t.text}</span>
+        ) : (
+          <span key={i} className={TOKEN_CLASS[t.kind]}>
+            {t.text}
+          </span>
+        ),
+      )}
+    </span>
+  );
+}
+
+interface FileRowProps {
+  file: DiffFile;
+  note?: string;
+  open: boolean;
+  onToggle: () => void;
+  reviewNote: string;
+  onReviewNote?: (note: string) => void;
+  ref?: React.Ref<HTMLDivElement>;
+}
+
+function FileRow({
+  file,
+  note,
+  open,
+  onToggle,
+  reviewNote,
+  onReviewNote,
+  ref,
+}: FileRowProps) {
   const dir = dirname(file.path);
   return (
-    <div className="rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-panel)]">
+    <div
+      ref={ref}
+      className="rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-panel)]"
+    >
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={onToggle}
         className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-[var(--color-panel-2)]"
       >
         <span className={`w-3 font-mono text-[12px] ${statusColor(file.status)}`}>
@@ -162,16 +261,16 @@ function FileRow({ file, note }: { file: DiffFile; note?: string }) {
                   key={li}
                   className={
                     l.origin === "+"
-                      ? "bg-[var(--color-add-bg)] text-[var(--color-add)]"
+                      ? "bg-[var(--color-add-bg)]"
                       : l.origin === "-"
-                        ? "bg-[var(--color-del-bg)] text-[var(--color-del)]"
-                        : "text-[var(--color-fg-muted)]"
+                        ? "bg-[var(--color-del-bg)]"
+                        : ""
                   }
                 >
                   <span className="select-none px-3 text-[var(--color-fg-subtle)]">
-                    {l.origin === " " ? " " : l.origin}
+                    {l.origin === " " ? " " : l.origin}
                   </span>
-                  <span className="whitespace-pre">{l.content}</span>
+                  <Highlighted content={l.content} />
                 </div>
               ))}
             </div>
@@ -181,6 +280,17 @@ function FileRow({ file, note }: { file: DiffFile; note?: string }) {
       {open && file.binary && (
         <div className="border-t border-[var(--color-border)] px-3 py-2 text-[12px] text-[var(--color-fg-subtle)]">
           Binary file — no textual diff.
+        </div>
+      )}
+
+      {open && onReviewNote && (
+        <div className="border-t border-[var(--color-border)] px-3 py-2">
+          <input
+            value={reviewNote}
+            onChange={(e) => onReviewNote(e.target.value)}
+            placeholder="review note for this file…"
+            className="w-full rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1 text-[12px] outline-none focus:border-[var(--color-accent-dim)]"
+          />
         </div>
       )}
     </div>

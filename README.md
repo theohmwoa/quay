@@ -88,16 +88,31 @@ pnpm typecheck && pnpm test && pnpm build
 pnpm tauri build --no-bundle
 ```
 
-## v1 status
+## Features
 
-Working: worktree create/list, narrated branch-vs-base diff (offline + Haiku),
-live terminal per selected worktree, agent deck.
+**Agent loop (task → review → land).** Each worktree shows live status
+(changed / ↑ahead / ↓behind). The diff view's land panel lets you generate a
+commit message (Haiku or offline), commit, push, open a PR via `gh`, or **land**
+the branch — merge it into base (with conflict detection) and remove the
+worktree. Conflicts are detected up front and the merge aborted cleanly.
 
-Known v1 limitations / next up:
+**Multi-terminal deck.** Open multiple terminals (shell or `claude`) per
+worktree as **tabs**; every PTY stays alive when you switch — never resets a
+running Claude. **Split** view shows two panes side by side. Each terminal has
+**scrollback search** (Cmd/Ctrl+F) and retains output for replay. The deck
+(repo, base, open sessions) **persists across app restarts**.
 
-- One active terminal at a time — switching worktrees ends the previous
-  terminal. Backend already supports many concurrent PTYs (`PtyManager`);
-  persistent multi-terminal panels are the next frontend step.
-- Worktree name auto-suggestion via Haiku (a natural second "smart sprinkle").
+**Diff review.** Narrated branch-vs-base diff with intent clusters and risks;
+**syntax-highlighted** hunks, per-file navigation, and reviewer notes. A
+**commit-by-commit timeline** reads the branch as steps, and **Ask** lets you
+interrogate the diff in natural language (Haiku).
+
+## v1 limitations / next up
+
+- Split view is two panes; arbitrary grids/nesting are future work.
+- Per-commit timeline shows each commit's own diff; per-commit Haiku narration
+  (vs. the author's subject) is a possible enhancement.
 - A native folder picker for the repo path (currently a text field).
-- Diff caching so the diff view doesn't recompute on every visit.
+- Diff/timeline caching so views don't recompute on every visit.
+- Reattach replay (`pty_scrollback`) is wired in the backend; the frontend
+  currently keeps PTYs alive in-process rather than replaying after a restart.

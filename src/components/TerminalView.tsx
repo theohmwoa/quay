@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -13,18 +14,12 @@ import {
 } from "../lib/api";
 
 interface Props {
-  /** Working directory for the spawned process (a worktree path). */
   cwd: string;
-  /** Program to run, e.g. "claude" or the shell. */
   command: string;
   args: string[];
   /** Stable key; one PTY exists per session for its whole lifetime. */
   sessionKey: string;
-  /**
-   * Whether this terminal should accept keyboard input and hold focus. Only
-   * the visible, unobstructed terminal is interactive — hidden ones and any
-   * terminal behind a modal are not, so keystrokes never leak.
-   */
+  /** Accept input and hold focus only when active and unobstructed. */
   interactive: boolean;
 }
 
@@ -38,19 +33,19 @@ const THEME = {
 };
 
 /**
- * A live terminal bound to a PTY running `command` in `cwd`. The PTY is
- * spawned once (keyed by `sessionKey`) and survives view/program switches —
- * the parent keeps this component mounted and merely hides it — so a running
- * Claude session is never lost. The PTY is only killed when this component is
- * truly unmounted (the session is closed or the app exits).
+ * A live terminal bound to a PTY. The PTY is spawned once per `sessionKey` and
+ * kept alive across view/program/worktree switches (the parent hides rather
+ * than unmounts it). Includes an in-terminal scrollback search (Cmd/Ctrl+F).
  */
 export function TerminalView({ cwd, command, args, sessionKey, interactive }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
 
-  // Spawn + wiring. Keyed on sessionKey only: cwd/command/args are constant
-  // for a given session, so this runs exactly once per terminal.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
   useEffect(() => {
     let disposed = false;
     let ptyId: string | null = null;
@@ -62,11 +57,24 @@ export function TerminalView({ cwd, command, args, sessionKey, interactive }: Pr
       theme: THEME,
       cursorBlink: true,
       allowProposedApi: true,
+      scrollback: 10000,
     });
     const fit = new FitAddon();
+    const search = new SearchAddon();
     term.loadAddon(fit);
+    term.loadAddon(search);
     termRef.current = term;
     fitRef.current = fit;
+    searchRef.current = search;
+
+    // Intercept Cmd/Ctrl+F to open our search bar instead of the browser's.
+    term.attachCustomKeyEventHandler((e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        if (e.type === "keydown") setSearchOpen(true);
+        return false;
+      }
+      return true;
+    });
 
     const el = containerRef.current;
     if (el) {
@@ -80,9 +88,7 @@ export function TerminalView({ cwd, command, args, sessionKey, interactive }: Pr
 
     (async () => {
       try {
-        const cols = term.cols || 80;
-        const rows = term.rows || 24;
-        const id = await ptySpawn(cwd, command, args, cols, rows);
+        const id = await ptySpawn(cwd, command, args, term.cols || 80, term.rows || 24);
         if (disposed) {
           void ptyKill(id);
           return;
@@ -121,18 +127,16 @@ export function TerminalView({ cwd, command, args, sessionKey, interactive }: Pr
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
 
-  // Toggle interactivity: disable stdin and blur when this terminal is hidden
-  // or sitting behind a modal; re-enable, refit and focus when it's active.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
     term.options.disableStdin = !interactive;
     if (interactive) {
-      // Becoming visible/active: re-measure (it may have been hidden) and focus.
       requestAnimationFrame(() => {
         try {
           fitRef.current?.fit();
@@ -146,5 +150,54 @@ export function TerminalView({ cwd, command, args, sessionKey, interactive }: Pr
     }
   }, [interactive]);
 
-  return <div ref={containerRef} className="h-full w-full px-2 py-1" />;
+  const runSearch = (forward: boolean) => {
+    if (!query) return;
+    if (forward) searchRef.current?.findNext(query);
+    else searchRef.current?.findPrevious(query);
+  };
+
+  return (
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full px-2 py-1" />
+      {searchOpen && (
+        <div className="absolute right-3 top-2 flex items-center gap-1 rounded-[var(--radius)] border border-[var(--color-border-strong)] bg-[var(--color-panel)] px-1.5 py-1">
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runSearch(!e.shiftKey);
+              if (e.key === "Escape") setSearchOpen(false);
+            }}
+            placeholder="find…"
+            className="w-40 bg-transparent px-1 text-[12px] outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => runSearch(false)}
+            className="px-1 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+            title="Previous (Shift+Enter)"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            onClick={() => runSearch(true)}
+            className="px-1 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+            title="Next (Enter)"
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            onClick={() => setSearchOpen(false)}
+            className="px-1 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+            title="Close (Esc)"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }

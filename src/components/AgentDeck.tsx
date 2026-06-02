@@ -1,10 +1,12 @@
-import type { Worktree } from "../lib/api";
+import type { WorktreeStatus, Worktree } from "../lib/api";
 import { basename, worktreeLabel } from "../lib/format";
+import { statusSummary } from "../lib/status";
 
 interface Props {
   worktrees: Worktree[];
   selectedPath: string | null;
   busy?: boolean;
+  statuses?: Record<string, WorktreeStatus>;
   onSelect: (path: string) => void;
   onNewAgent: () => void;
   onRefresh: () => void;
@@ -18,6 +20,7 @@ export function AgentDeck({
   worktrees,
   selectedPath,
   busy,
+  statuses,
   onSelect,
   onNewAgent,
   onRefresh,
@@ -82,7 +85,9 @@ export function AgentDeck({
                         {worktreeLabel(wt.branch, wt.head, wt.path)}
                       </span>
                       <span className="block truncate text-[11px] text-[var(--color-fg-subtle)]">
-                        {basename(wt.path)}
+                        {statuses?.[wt.path]
+                          ? statusSummary(statuses[wt.path])
+                          : basename(wt.path)}
                       </span>
                     </span>
                     {wt.is_main && (

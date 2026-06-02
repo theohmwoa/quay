@@ -1,53 +1,99 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  commitTimeline,
+  commitWorktree,
   createWorktree,
   diffBranchVsBase,
+  landWorktree,
   listWorktrees,
+  loadState,
   narrateDiff,
+  openPr,
+  pushBranch,
+  removeWorktree,
+  saveState,
+  suggestCommitMessage,
+  worktreeStatus,
+  askDiff,
   type DiffSummary,
   type Narration,
+  type TimelineEntry,
+  type WorktreeStatus,
   type Worktree,
 } from "./lib/api";
 import { AgentDeck } from "./components/AgentDeck";
 import { NarratedDiff } from "./components/NarratedDiff";
-import { TerminalView } from "./components/TerminalView";
-import {
-  commandFor,
-  isSessionActive,
-  sessionKey,
-  upsertSession,
-  type Program,
-  type Session,
-  type View,
-} from "./lib/sessions";
+import { TerminalDeck } from "./components/TerminalDeck";
+import { LandPanel } from "./components/LandPanel";
+import { DiffTimeline } from "./components/DiffTimeline";
+import { AskPanel } from "./components/AskPanel";
+import { sessionKey, upsertSession, type Program, type Session, type View } from "./lib/sessions";
 
-const LS_REPO = "quay.repoPath";
-const LS_BASE = "quay.base";
-const NO_ARGS: string[] = [];
+const VIEWS: View[] = ["terminal", "diff", "timeline", "ask"];
 
 function App() {
-  const [repoPath, setRepoPath] = useState(() => localStorage.getItem(LS_REPO) ?? "");
-  const [repoInput, setRepoInput] = useState(repoPath);
-  const [base, setBase] = useState(() => localStorage.getItem(LS_BASE) ?? "main");
+  const [repoPath, setRepoPath] = useState("");
+  const [repoInput, setRepoInput] = useState("");
+  const [base, setBase] = useState("main");
 
   const [worktrees, setWorktrees] = useState<Worktree[]>([]);
+  const [statuses, setStatuses] = useState<Record<string, WorktreeStatus>>({});
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [view, setView] = useState<View>("terminal");
-  const [program, setProgram] = useState<Program>("shell");
 
-  // Every terminal the user has opened stays mounted (and its PTY alive) so
-  // switching view/program/worktree never kills a running session.
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [view, setView] = useState<View>("terminal");
 
   const [diff, setDiff] = useState<DiffSummary | null>(null);
   const [narration, setNarration] = useState<Narration | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [notes, setNotes] = useState<Record<string, string>>({});
+
+  const [commitMessage, setCommitMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
-  const [busy, setBusy] = useState(false);
+  const loadedRef = useRef(false);
 
+  const selectedWorktree = worktrees.find((w) => w.path === selectedPath) ?? null;
+  const selectedStatus = selectedPath ? statuses[selectedPath] ?? null : null;
+
+  // --- persistence: restore on launch, save on change ----------------------
+  useEffect(() => {
+    loadState()
+      .then((st) => {
+        if (st.repo_path) {
+          setRepoPath(st.repo_path);
+          setRepoInput(st.repo_path);
+        }
+        if (st.base) setBase(st.base);
+        const restored = st.sessions.map((s) => ({
+          path: s.path,
+          program: s.program as Program,
+        }));
+        setSessions(restored);
+        if (restored[0]) setActiveKey(sessionKey(restored[0].path, restored[0].program));
+      })
+      .catch(() => {})
+      .finally(() => {
+        loadedRef.current = true;
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    void saveState({
+      repo_path: repoPath,
+      base,
+      sessions: sessions.map((s) => ({ path: s.path, program: s.program })),
+    });
+  }, [repoPath, base, sessions]);
+
+  // --- worktrees + statuses ------------------------------------------------
   const refreshWorktrees = useCallback(async () => {
     if (!repoPath) return;
     try {
@@ -55,24 +101,28 @@ function App() {
       setWorktrees(wts);
       setError(null);
       setSelectedPath((cur) => cur ?? wts.find((w) => !w.is_main)?.path ?? wts[0]?.path ?? null);
+      // Fetch status for each worktree (small N) for the deck badges.
+      const entries = await Promise.all(
+        wts.map(async (w) => {
+          try {
+            return [w.path, await worktreeStatus(w.path, base)] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      setStatuses(Object.fromEntries(entries.filter(Boolean) as [string, WorktreeStatus][]));
     } catch (e) {
       setError(String(e));
       setWorktrees([]);
     }
-  }, [repoPath]);
+  }, [repoPath, base]);
 
   useEffect(() => {
     void refreshWorktrees();
   }, [refreshWorktrees]);
 
-  // Lazily open (and thereafter keep) a terminal session for the active
-  // worktree + program once the terminal view is shown for it.
-  useEffect(() => {
-    if (view !== "terminal" || !selectedPath) return;
-    setSessions((prev) => upsertSession(prev, selectedPath, program));
-  }, [view, selectedPath, program]);
-
-  // Load the narrated diff whenever the diff view is shown for a selection.
+  // --- lazy data per view --------------------------------------------------
   useEffect(() => {
     if (view !== "diff" || !selectedPath) return;
     let cancelled = false;
@@ -91,13 +141,124 @@ function App() {
     };
   }, [view, selectedPath, base]);
 
-  const openRepo = () => {
-    const p = repoInput.trim();
-    setRepoPath(p);
-    localStorage.setItem(LS_REPO, p);
-    setSelectedPath(null);
+  useEffect(() => {
+    if (view !== "timeline" || !selectedPath) return;
+    let cancelled = false;
+    commitTimeline(selectedPath, base)
+      .then((t) => !cancelled && setTimeline(t))
+      .catch((e) => !cancelled && setError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [view, selectedPath, base]);
+
+  // Reset reviewer notes when the selected worktree changes.
+  useEffect(() => setNotes({}), [selectedPath]);
+
+  // --- session / selection plumbing ----------------------------------------
+  const openSession = (path: string, program: Program) => {
+    setSessions((prev) => upsertSession(prev, path, program));
+    setActiveKey(sessionKey(path, program));
+    setView("terminal");
   };
 
+  const selectWorktree = (path: string) => {
+    setSelectedPath(path);
+    const existing = sessions.find((s) => s.path === path);
+    if (existing) setActiveKey(sessionKey(existing.path, existing.program));
+    else if (view === "terminal") openSession(path, "shell");
+  };
+
+  const activateSession = (key: string) => {
+    setActiveKey(key);
+    const s = sessions.find((x) => sessionKey(x.path, x.program) === key);
+    if (s) setSelectedPath(s.path);
+  };
+
+  const closeSession = (key: string) => {
+    setSessions((prev) => prev.filter((s) => sessionKey(s.path, s.program) !== key));
+    setActiveKey((cur) => {
+      if (cur !== key) return cur;
+      const remaining = sessions.filter((s) => sessionKey(s.path, s.program) !== key);
+      return remaining[0] ? sessionKey(remaining[0].path, remaining[0].program) : null;
+    });
+  };
+
+  // --- lifecycle actions ---------------------------------------------------
+  const run = async (fn: () => Promise<string | null>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const msg = await fn();
+      setNotice(msg);
+      await refreshWorktrees();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const branch = selectedWorktree?.branch ?? "";
+
+  const onSuggest = () =>
+    run(async () => {
+      if (!selectedPath) return null;
+      setCommitMessage(await suggestCommitMessage(selectedPath, base));
+      return "Suggested a commit message.";
+    });
+
+  const onCommit = () =>
+    run(async () => {
+      if (!selectedPath) return null;
+      const sha = await commitWorktree(selectedPath, commitMessage);
+      setCommitMessage("");
+      return `Committed ${sha}.`;
+    });
+
+  const onPush = () =>
+    run(async () => {
+      if (!selectedPath || !branch) return null;
+      await pushBranch(selectedPath, "origin", branch);
+      return `Pushed ${branch} to origin.`;
+    });
+
+  const onOpenPr = () =>
+    run(async () => {
+      if (!selectedPath || !branch) return null;
+      const title = commitMessage.split("\n")[0].trim() || branch;
+      const url = await openPr(selectedPath, title, commitMessage, base, branch);
+      return `PR: ${url}`;
+    });
+
+  const onLand = () =>
+    run(async () => {
+      if (!selectedPath || !branch) return null;
+      const result = await landWorktree(repoPath, selectedPath, branch, base);
+      if (result.kind === "conflicts") {
+        return `Conflicts in: ${result.files.join(", ")}`;
+      }
+      // Worktree was removed; clean up its sessions and selection.
+      sessions
+        .filter((s) => s.path === selectedPath)
+        .forEach((s) => closeSession(sessionKey(s.path, s.program)));
+      setSelectedPath(null);
+      return result.kind === "merged" ? `Landed ${branch} → ${base} (${result.sha}).` : "Already up to date.";
+    });
+
+  const onDiscard = () =>
+    run(async () => {
+      if (!selectedPath) return null;
+      const path = selectedPath;
+      await removeWorktree(repoPath, path, true);
+      sessions
+        .filter((s) => s.path === path)
+        .forEach((s) => closeSession(sessionKey(s.path, s.program)));
+      setSelectedPath(null);
+      return "Worktree discarded.";
+    });
+
+  // --- new agent -----------------------------------------------------------
   const submitNewAgent = async () => {
     if (!repoPath || !newName.trim()) return;
     setBusy(true);
@@ -108,8 +269,7 @@ function App() {
       setNewName("");
       await refreshWorktrees();
       setSelectedPath(wt.path);
-      setProgram("claude");
-      setView("terminal");
+      openSession(wt.path, "claude");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -117,9 +277,14 @@ function App() {
     }
   };
 
+  const openRepo = () => {
+    const p = repoInput.trim();
+    setRepoPath(p);
+    setSelectedPath(null);
+  };
+
   return (
     <div className="relative flex h-full flex-col bg-[var(--color-bg)] text-[var(--color-fg)]">
-      {/* Top bar */}
       <header className="flex items-center gap-3 border-b border-[var(--color-border)] px-3 py-2">
         <span className="font-mono text-[13px] font-semibold tracking-tight text-[var(--color-accent)]">
           quay
@@ -143,17 +308,14 @@ function App() {
           base
           <input
             value={base}
-            onChange={(e) => {
-              setBase(e.target.value);
-              localStorage.setItem(LS_BASE, e.target.value);
-            }}
+            onChange={(e) => setBase(e.target.value)}
             spellCheck={false}
             className="w-24 rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-panel)] px-2 py-1 font-mono text-[12px] outline-none focus:border-[var(--color-accent-dim)]"
           />
         </label>
 
         <div className="ml-auto flex overflow-hidden rounded-[var(--radius)] border border-[var(--color-border-strong)]">
-          {(["terminal", "diff"] as View[]).map((v) => (
+          {VIEWS.map((v) => (
             <button
               key={v}
               type="button"
@@ -177,88 +339,72 @@ function App() {
       )}
 
       <div className="flex min-h-0 flex-1">
-        {/* Sidebar */}
         <aside className="w-64 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-panel)]">
           <AgentDeck
             worktrees={worktrees}
             selectedPath={selectedPath}
+            statuses={statuses}
             busy={busy}
-            onSelect={(p) => setSelectedPath(p)}
+            onSelect={selectWorktree}
             onNewAgent={() => setShowNew(true)}
             onRefresh={() => void refreshWorktrees()}
           />
         </aside>
 
-        {/* Main */}
         <main className="relative min-w-0 flex-1">
           {!repoPath ? (
             <Empty>Set a repository path above to begin.</Empty>
+          ) : view === "terminal" ? (
+            <TerminalDeck
+              sessions={sessions}
+              activeKey={activeKey}
+              onActivate={activateSession}
+              onClose={closeSession}
+              onNew={(p) => selectedPath && openSession(selectedPath, p)}
+              canOpen={!!selectedPath}
+              visible={view === "terminal"}
+              modalOpen={showNew}
+            />
           ) : !selectedPath ? (
-            <Empty>Select or create an agent in the deck.</Empty>
-          ) : (
+            <Empty>Select an agent in the deck.</Empty>
+          ) : view === "diff" ? (
             <div className="flex h-full flex-col">
-              {view === "terminal" && (
-                <div className="flex items-center gap-1 border-b border-[var(--color-border)] px-2 py-1.5">
-                  {(["shell", "claude"] as Program[]).map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      onClick={() => setProgram(p)}
-                      className={`rounded-[var(--radius)] px-2 py-0.5 text-[11px] capitalize ${
-                        program === p
-                          ? "bg-[var(--color-panel-2)] text-[var(--color-fg)]"
-                          : "text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
-                      }`}
-                    >
-                      {p}
-                    </button>
-                  ))}
-                  <span className="ml-2 truncate font-mono text-[11px] text-[var(--color-fg-subtle)]">
-                    {selectedPath}
-                  </span>
-                </div>
-              )}
-
-              {/* Stage: terminals stay mounted; the diff view overlays them. */}
-              <div className="relative min-h-0 flex-1">
-                {sessions.map((s) => {
-                  const key = sessionKey(s.path, s.program);
-                  const active = isSessionActive(s, view, selectedPath, program);
-                  return (
-                    <div
-                      key={key}
-                      className="absolute inset-0"
-                      style={{ display: active ? "block" : "none" }}
-                    >
-                      <TerminalView
-                        cwd={s.path}
-                        command={commandFor(s.program)}
-                        args={NO_ARGS}
-                        sessionKey={key}
-                        interactive={active && !showNew}
-                      />
-                    </div>
-                  );
-                })}
-
-                {view === "diff" && (
-                  <div className="absolute inset-0 bg-[var(--color-bg)]">
-                    {diffLoading ? (
-                      <Empty>Computing diff against {base}…</Empty>
-                    ) : diff && narration ? (
-                      <NarratedDiff diff={diff} narration={narration} />
-                    ) : (
-                      <Empty>No diff to show.</Empty>
-                    )}
-                  </div>
+              <LandPanel
+                status={selectedStatus}
+                busy={busy}
+                message={commitMessage}
+                onMessageChange={setCommitMessage}
+                onSuggest={onSuggest}
+                onCommit={onCommit}
+                onPush={onPush}
+                onOpenPr={onOpenPr}
+                onLand={onLand}
+                onDiscard={onDiscard}
+                notice={notice}
+              />
+              <div className="min-h-0 flex-1">
+                {diffLoading ? (
+                  <Empty>Computing diff against {base}…</Empty>
+                ) : diff && narration ? (
+                  <NarratedDiff
+                    diff={diff}
+                    narration={narration}
+                    notes={notes}
+                    onNote={(path, note) => setNotes((n) => ({ ...n, [path]: note }))}
+                  />
+                ) : (
+                  <Empty>No diff to show.</Empty>
                 )}
               </div>
             </div>
+          ) : view === "timeline" ? (
+            <DiffTimeline entries={timeline} />
+          ) : (
+            <AskPanel ask={(q) => askDiff(selectedPath, base, q)} />
           )}
         </main>
       </div>
 
-      {/* New agent overlay */}
       {showNew && (
         <div
           className="absolute inset-0 z-10 flex items-start justify-center bg-black/50 pt-32"
@@ -270,7 +416,7 @@ function App() {
           >
             <h2 className="mb-3 text-[13px] font-semibold">New agent</h2>
             <p className="mb-2 text-[12px] text-[var(--color-fg-muted)]">
-              Creates a worktree on a new branch off <code>{base}</code>.
+              Creates a worktree on a new branch off <code>{base}</code>, and opens Claude in it.
             </p>
             <input
               autoFocus
