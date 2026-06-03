@@ -1,10 +1,13 @@
 //! Structured branch-vs-base diffs.
 //!
 //! The signature feature: instead of "diff against remote", we compute the
-//! *whole feature* diff — `base...HEAD` (everything since the worktree's
-//! branch diverged from `base`, usually `main`). The result is structured
-//! data (files, hunks, lines, stats) ready for the frontend to render and
-//! for the narrator to summarize.
+//! *whole feature* diff — everything in the worktree that differs from `base`
+//! (usually `main`), since the branch diverged. Crucially this includes
+//! **uncommitted** work: the diff is computed against the working directory
+//! (staged, unstaged, and untracked files), not just the committed `HEAD`, so
+//! changes show up the moment they're saved — no commit required. The result
+//! is structured data (files, hunks, lines, stats) ready for the frontend to
+//! render and for the narrator to summarize.
 
 use std::path::Path;
 
@@ -28,7 +31,8 @@ pub enum FileStatus {
 impl From<Delta> for FileStatus {
     fn from(d: Delta) -> Self {
         match d {
-            Delta::Added => FileStatus::Added,
+            // Untracked files (new, never `git add`ed) read as additions.
+            Delta::Added | Delta::Untracked => FileStatus::Added,
             Delta::Deleted => FileStatus::Deleted,
             Delta::Modified => FileStatus::Modified,
             Delta::Renamed => FileStatus::Renamed,
@@ -81,11 +85,18 @@ pub struct DiffSummary {
     pub total_deletions: usize,
 }
 
-/// Compute the `base...HEAD` diff for the repo (or worktree) at `repo_path`.
+/// Label used for the "head" side of a diff when it's the working directory
+/// rather than a specific commit.
+const WORKDIR_LABEL: &str = "working tree";
+
+/// Compute the diff of the worktree at `repo_path` against `base`.
 ///
 /// This finds the merge-base of `base` and the current HEAD, then diffs that
-/// common ancestor's tree against HEAD — i.e. exactly the changes the branch
-/// introduced, ignoring anything that landed on `base` in the meantime.
+/// common ancestor's tree against the **working directory** — staged,
+/// unstaged, and untracked changes all included. The result is everything the
+/// worktree currently differs from `base` by, regardless of whether it has
+/// been committed, while still ignoring anything that landed on `base` after
+/// divergence.
 pub fn branch_vs_base(repo_path: &Path, base: &str) -> Result<DiffSummary> {
     let repo = Repository::open(repo_path)?;
 
@@ -97,19 +108,23 @@ pub fn branch_vs_base(repo_path: &Path, base: &str) -> Result<DiffSummary> {
 
     let merge_base = repo.merge_base(base_commit.id(), head_commit.id())?;
     let base_tree = repo.find_commit(merge_base)?.tree()?;
-    let head_tree = head_commit.tree()?;
-    let head_label = head_commit
-        .as_object()
-        .short_id()?
-        .as_str()
-        .unwrap_or("")
-        .to_string();
 
-    build_diff_summary(&repo, Some(&base_tree), Some(&head_tree), base, &head_label)
+    let mut opts = git2::DiffOptions::new();
+    opts.context_lines(3);
+    // Include uncommitted work so changes appear without needing a commit, and
+    // emit the actual contents of untracked files so they render real hunks.
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true);
+    // Compare the base tree to the working directory, using the index as a
+    // shortcut so both staged and unstaged changes are captured.
+    let diff = repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?;
+
+    process_diff(diff, base, WORKDIR_LABEL)
 }
 
 /// Build a [`DiffSummary`] from two trees (either may be `None` for the empty
-/// tree). Shared by [`branch_vs_base`] and the per-commit timeline.
+/// tree). Used by the per-commit timeline, which compares committed snapshots.
 pub fn build_diff_summary(
     repo: &Repository,
     old_tree: Option<&git2::Tree>,
@@ -119,7 +134,13 @@ pub fn build_diff_summary(
 ) -> Result<DiffSummary> {
     let mut opts = git2::DiffOptions::new();
     opts.context_lines(3);
-    let mut diff = repo.diff_tree_to_tree(old_tree, new_tree, Some(&mut opts))?;
+    let diff = repo.diff_tree_to_tree(old_tree, new_tree, Some(&mut opts))?;
+    process_diff(diff, base, head)
+}
+
+/// Walk a prepared [`git2::Diff`] into a structured [`DiffSummary`]. Shared by
+/// [`branch_vs_base`] (tree-vs-workdir) and [`build_diff_summary`] (tree-vs-tree).
+fn process_diff(mut diff: git2::Diff, base: &str, head: &str) -> Result<DiffSummary> {
     // Detect renames so they show up as Renamed rather than add+delete.
     diff.find_similar(None)?;
 
@@ -241,6 +262,42 @@ mod tests {
             !diff.files.iter().any(|f| f.path == "on_main.txt"),
             "merge-base diff must exclude commits that landed on main after divergence"
         );
+    }
+
+    #[test]
+    fn includes_uncommitted_modifications() {
+        let repo = TestRepo::new();
+        repo.checkout_new_branch("feature");
+        // Modify a tracked file but do NOT commit it.
+        std::fs::write(repo.path().join("README.md"), "# initial\nuncommitted line\n")
+            .expect("write file");
+
+        let diff = branch_vs_base(repo.path(), "main").unwrap();
+        let modified = diff
+            .files
+            .iter()
+            .find(|f| f.path == "README.md")
+            .expect("uncommitted edit should appear in the diff");
+        assert_eq!(modified.status, FileStatus::Modified);
+        assert!(modified.additions >= 1);
+        assert_eq!(diff.head, WORKDIR_LABEL);
+    }
+
+    #[test]
+    fn includes_untracked_files() {
+        let repo = TestRepo::new();
+        repo.checkout_new_branch("feature");
+        // A brand-new, never-added file must still show up.
+        std::fs::write(repo.path().join("scratch.txt"), "new work\n").expect("write file");
+
+        let diff = branch_vs_base(repo.path(), "main").unwrap();
+        let added = diff
+            .files
+            .iter()
+            .find(|f| f.path == "scratch.txt")
+            .expect("untracked file should appear in the diff");
+        assert_eq!(added.status, FileStatus::Added);
+        assert!(!added.hunks.is_empty());
     }
 
     #[test]

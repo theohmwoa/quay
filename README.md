@@ -49,7 +49,8 @@ underneath).
 
 Not a raw git diff — a **narrated change review**:
 
-- scope is `git diff main...HEAD` (merge-base) → the whole feature
+- scope is the worktree vs `main`'s merge-base → the whole feature, including
+  **uncommitted** work (staged, unstaged, and untracked) — no commit required
 - a one-paragraph summary of what the change accomplishes
 - changes grouped **by intent**, not alphabetically by file
 - risk flags ("files deleted", "large change in X")
