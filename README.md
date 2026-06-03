@@ -73,7 +73,7 @@ pure, separately tested functions.
 
 ```sh
 pnpm install
-pnpm tauri dev        # run the app
+pnpm tauri dev        # run the app in development mode
 ```
 
 ## Test & verify
