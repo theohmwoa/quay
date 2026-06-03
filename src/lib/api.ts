@@ -208,8 +208,8 @@ export const saveState = (state: PersistedState) =>
 
 // --- Agent SDK runs (structured, more powerful alternative to the CLI) ------
 
-export const agentStart = (cwd: string, prompt: string, model?: string) =>
-  invoke<string>("agent_start", { cwd, prompt, model: model ?? null });
+export const agentStart = (cwd: string, prompt: string, resume?: string, model?: string) =>
+  invoke<string>("agent_start", { cwd, prompt, model: model ?? null, resume: resume ?? null });
 
 export const agentStop = (id: string) => invoke<void>("agent_stop", { id });
 

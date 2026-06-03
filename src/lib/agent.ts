@@ -21,12 +21,32 @@ export interface AgentEvent {
   turns?: number;
 }
 
-/** A single agent run, owned by App so its feed survives view switches. */
-export interface AgentRun {
-  id: string | null;
-  task: string;
+/** One exchange in a chat: the user's message and the streamed events back. */
+export interface ChatTurn {
+  question: string;
   events: AgentEvent[];
+}
+
+/** A multi-turn chat with Claude in a worktree. Owned by App so it survives
+ *  view switches. `sessionId` (captured from the stream) lets the next turn
+ *  resume the same Claude conversation. */
+export interface Chat {
+  /** Current agent run id (the in-flight turn), or null when idle. */
+  runId: string | null;
+  /** Claude session id to resume; captured from streamed messages. */
+  sessionId: string | null;
+  turns: ChatTurn[];
   running: boolean;
+}
+
+/** Pull a Claude session id out of a raw SDK message line, if present. */
+export function extractSessionId(raw: string): string | null {
+  try {
+    const msg = JSON.parse(raw);
+    return typeof msg.session_id === "string" ? msg.session_id : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Short, human description of a tool_use block's input. */

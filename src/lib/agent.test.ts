@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { summarizeAgentEvent } from "./agent";
+import { summarizeAgentEvent, extractSessionId } from "./agent";
+
+describe("extractSessionId", () => {
+  it("pulls session_id from a message that has one", () => {
+    expect(extractSessionId('{"type":"system","session_id":"sess-9"}')).toBe("sess-9");
+  });
+  it("returns null when absent or unparseable", () => {
+    expect(extractSessionId('{"type":"assistant"}')).toBeNull();
+    expect(extractSessionId("not json")).toBeNull();
+  });
+});
 
 describe("summarizeAgentEvent", () => {
   it("ignores blank lines", () => {

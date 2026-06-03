@@ -311,8 +311,9 @@ fn agent_start(
     cwd: String,
     prompt: String,
     model: Option<String>,
+    resume: Option<String>,
 ) -> Result<String> {
-    let (handle, rx) = agent::start(&prompt, Path::new(&cwd), model.as_deref())?;
+    let (handle, rx) = agent::start(&prompt, Path::new(&cwd), model.as_deref(), resume.as_deref())?;
     let id = state.next_id.fetch_add(1, Ordering::Relaxed).to_string();
 
     let app_for_thread = app.clone();

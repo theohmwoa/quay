@@ -31,11 +31,11 @@ import { TerminalDeck } from "./components/TerminalDeck";
 import { LandPanel } from "./components/LandPanel";
 import { DiffTimeline } from "./components/DiffTimeline";
 import { AskPanel } from "./components/AskPanel";
-import { AgentRunPanel } from "./components/AgentRunPanel";
-import { summarizeAgentEvent, type AgentRun } from "./lib/agent";
+import { ChatPanel } from "./components/ChatPanel";
+import { summarizeAgentEvent, extractSessionId, type Chat } from "./lib/agent";
 import { sessionKey, upsertSession, type Program, type Session, type View } from "./lib/sessions";
 
-const VIEWS: View[] = ["terminal", "agent", "diff", "timeline", "ask"];
+const VIEWS: View[] = ["terminal", "chat", "diff", "timeline", "ask"];
 
 function App() {
   const [repoPath, setRepoPath] = useState("");
@@ -65,10 +65,10 @@ function App() {
   const [newName, setNewName] = useState("");
   const loadedRef = useRef(false);
 
-  // Agent SDK runs, keyed by worktree path. Owned here so the live feed and
+  // Claude chats, keyed by worktree path. Owned here so the conversation and
   // its event subscriptions survive view switches (App never unmounts).
-  const [agentRuns, setAgentRuns] = useState<Record<string, AgentRun>>({});
-  const agentUnlisteners = useRef<Record<string, Array<() => void>>>({});
+  const [chats, setChats] = useState<Record<string, Chat>>({});
+  const chatUnlisteners = useRef<Record<string, Array<() => void>>>({});
 
   const selectedWorktree = worktrees.find((w) => w.path === selectedPath) ?? null;
   const selectedStatus = selectedPath ? statuses[selectedPath] ?? null : null;
@@ -293,7 +293,8 @@ function App() {
       setNewName("");
       await refreshWorktrees();
       setSelectedPath(wt.path);
-      openSession(wt.path, "claude");
+      // New agents open as a chat with Claude (not a CLI terminal).
+      setView("chat");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -307,44 +308,78 @@ function App() {
     setSelectedPath(null);
   };
 
-  // --- agent runs (SDK) ----------------------------------------------------
-  const startAgent = async (path: string, task: string) => {
-    if (!task.trim()) return;
-    agentUnlisteners.current[path]?.forEach((u) => u());
-    agentUnlisteners.current[path] = [];
-    setAgentRuns((r) => ({ ...r, [path]: { id: null, task, events: [], running: true } }));
+  // Delete a worktree straight from the sidebar (closes its sessions too).
+  const deleteWorktree = (path: string) =>
+    run(async () => {
+      await removeWorktree(repoPath, path, true);
+      sessions
+        .filter((s) => s.path === path)
+        .forEach((s) => closeSession(sessionKey(s.path, s.program)));
+      if (selectedPath === path) setSelectedPath(null);
+      return "Worktree deleted.";
+    });
+
+  // --- chat (Agent SDK, runs on the Claude subscription) -------------------
+  // Append streamed events to the in-flight (last) turn of a chat.
+  const appendToLastTurn = (path: string, evs: ReturnType<typeof summarizeAgentEvent>) => {
+    if (!evs.length) return;
+    setChats((c) => {
+      const cur = c[path];
+      if (!cur || cur.turns.length === 0) return c;
+      const turns = cur.turns.slice();
+      const last = turns[turns.length - 1];
+      turns[turns.length - 1] = { ...last, events: [...last.events, ...evs] };
+      return { ...c, [path]: { ...cur, turns } };
+    });
+  };
+
+  const sendMessage = async (path: string, message: string) => {
+    if (!message.trim()) return;
+    const prev = chats[path];
+    const resumeId = prev?.sessionId ?? undefined;
+
+    // Add the user's turn and mark the chat running.
+    setChats((c) => {
+      const cur = c[path] ?? { runId: null, sessionId: null, turns: [], running: false };
+      return {
+        ...c,
+        [path]: {
+          ...cur,
+          turns: [...cur.turns, { question: message, events: [] }],
+          running: true,
+        },
+      };
+    });
+
     try {
-      const id = await agentStart(path, task);
-      setAgentRuns((r) => {
-        const cur = r[path] ?? { id: null, task, events: [], running: true };
-        return { ...r, [path]: { ...cur, id } };
-      });
+      const id = await agentStart(path, message, resumeId);
+      setChats((c) => (c[path] ? { ...c, [path]: { ...c[path], runId: id } } : c));
+
       const un1 = await onAgentEvent(id, (line) => {
-        const evs = summarizeAgentEvent(line);
-        if (!evs.length) return;
-        setAgentRuns((r) => {
-          const cur = r[path];
-          return cur ? { ...r, [path]: { ...cur, events: [...cur.events, ...evs] } } : r;
-        });
+        const sid = extractSessionId(line);
+        if (sid) {
+          setChats((c) => (c[path] ? { ...c, [path]: { ...c[path], sessionId: sid } } : c));
+        }
+        appendToLastTurn(path, summarizeAgentEvent(line));
       });
       const un2 = await onAgentExit(id, () => {
-        setAgentRuns((r) => (r[path] ? { ...r, [path]: { ...r[path], running: false } } : r));
+        setChats((c) =>
+          c[path] ? { ...c, [path]: { ...c[path], running: false, runId: null } } : c,
+        );
       });
-      agentUnlisteners.current[path] = [un1, un2];
+      chatUnlisteners.current[path] = [un1, un2];
     } catch (e) {
-      setAgentRuns((r) => ({
-        ...r,
-        [path]: { id: null, task, events: [{ kind: "error", text: String(e) }], running: false },
-      }));
+      appendToLastTurn(path, [{ kind: "error", text: String(e) }]);
+      setChats((c) => (c[path] ? { ...c, [path]: { ...c[path], running: false } } : c));
     }
   };
 
-  const stopAgent = (path: string) => {
-    const run = agentRuns[path];
-    if (run?.id) void agentStop(run.id);
-    agentUnlisteners.current[path]?.forEach((u) => u());
-    agentUnlisteners.current[path] = [];
-    setAgentRuns((r) => (r[path] ? { ...r, [path]: { ...r[path], running: false } } : r));
+  const stopChat = (path: string) => {
+    const chat = chats[path];
+    if (chat?.runId) void agentStop(chat.runId);
+    chatUnlisteners.current[path]?.forEach((u) => u());
+    chatUnlisteners.current[path] = [];
+    setChats((c) => (c[path] ? { ...c, [path]: { ...c[path], running: false, runId: null } } : c));
   };
 
   return (
@@ -412,6 +447,7 @@ function App() {
             onSelect={selectWorktree}
             onNewAgent={() => setShowNew(true)}
             onRefresh={() => void refreshWorktrees()}
+            onDelete={deleteWorktree}
           />
         </aside>
 
@@ -475,12 +511,12 @@ function App() {
                     </div>
                   ) : view === "timeline" ? (
                     <DiffTimeline entries={timeline} />
-                  ) : view === "agent" ? (
-                    <AgentRunPanel
-                      run={agentRuns[selectedPath]}
+                  ) : view === "chat" ? (
+                    <ChatPanel
+                      chat={chats[selectedPath]}
                       busy={busy}
-                      onStart={(t) => void startAgent(selectedPath, t)}
-                      onStop={() => stopAgent(selectedPath)}
+                      onSend={(m) => void sendMessage(selectedPath, m)}
+                      onStop={() => stopChat(selectedPath)}
                     />
                   ) : (
                     <AskPanel ask={(q) => askDiff(selectedPath, base, q)} />

@@ -64,12 +64,14 @@ pub fn stream_lines(
     Ok((AgentHandle { child }, rx))
 }
 
-/// Build the JSON payload passed to the sidecar.
-pub fn build_payload(prompt: &str, cwd: &Path, model: Option<&str>) -> String {
+/// Build the JSON payload passed to the sidecar. `resume` is a Claude session
+/// id to continue an existing chat (None starts a new session).
+pub fn build_payload(prompt: &str, cwd: &Path, model: Option<&str>, resume: Option<&str>) -> String {
     json!({
         "prompt": prompt,
         "cwd": cwd.to_string_lossy(),
         "model": model,
+        "resume": resume,
     })
     .to_string()
 }
@@ -95,13 +97,18 @@ pub fn sidecar_path() -> Option<PathBuf> {
 
 /// Start an agent run: spawn the Node sidecar with the payload, streaming its
 /// NDJSON output. Errors clearly if the sidecar can't be found.
-pub fn start(prompt: &str, cwd: &Path, model: Option<&str>) -> Result<(AgentHandle, Receiver<String>)> {
+pub fn start(
+    prompt: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    resume: Option<&str>,
+) -> Result<(AgentHandle, Receiver<String>)> {
     let sidecar = sidecar_path().ok_or_else(|| {
         QuayError::Invalid("agent sidecar not found (set QUAY_SIDECAR to agent-runner.mjs)".into())
     })?;
     let args = vec![
         sidecar.to_string_lossy().into_owned(),
-        build_payload(prompt, cwd, model),
+        build_payload(prompt, cwd, model, resume),
     ];
     stream_lines("node", &args, cwd)
 }
@@ -151,18 +158,26 @@ mod tests {
 
     #[test]
     fn build_payload_contains_prompt_and_cwd() {
-        let p = build_payload("fix the bug", Path::new("/repo/wt"), Some("claude-haiku-4-5"));
+        let p = build_payload("fix the bug", Path::new("/repo/wt"), Some("claude-haiku-4-5"), None);
         let v: serde_json::Value = serde_json::from_str(&p).unwrap();
         assert_eq!(v["prompt"], "fix the bug");
         assert_eq!(v["cwd"], "/repo/wt");
         assert_eq!(v["model"], "claude-haiku-4-5");
+        assert!(v["resume"].is_null());
     }
 
     #[test]
     fn build_payload_allows_null_model() {
-        let p = build_payload("x", Path::new("/r"), None);
+        let p = build_payload("x", Path::new("/r"), None, None);
         let v: serde_json::Value = serde_json::from_str(&p).unwrap();
         assert!(v["model"].is_null());
+    }
+
+    #[test]
+    fn build_payload_carries_resume_session_id() {
+        let p = build_payload("next", Path::new("/r"), None, Some("sess-abc"));
+        let v: serde_json::Value = serde_json::from_str(&p).unwrap();
+        assert_eq!(v["resume"], "sess-abc");
     }
 
     #[test]

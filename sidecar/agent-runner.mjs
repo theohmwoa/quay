@@ -4,7 +4,12 @@
 // The Rust backend spawns this with a JSON payload and forwards each line to
 // the frontend. Kept deliberately thin — all UI interpretation happens there.
 //
-// Payload (argv[2], JSON): { prompt, cwd, model?, maxTurns?, permissionMode? }
+// Payload (argv[2], JSON):
+//   { prompt, cwd, model?, maxTurns?, permissionMode?, resume? }
+// `resume` is a Claude session id — pass it to continue an existing chat.
+//
+// Auth: the SDK runs through the logged-in `claude` CLI, so this uses your
+// Claude subscription. No API key required.
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
@@ -22,14 +27,21 @@ async function main() {
     return;
   }
 
-  const { prompt, cwd, model, maxTurns = 24, permissionMode = "bypassPermissions" } = payload;
+  const {
+    prompt,
+    cwd,
+    model,
+    maxTurns = 24,
+    permissionMode = "bypassPermissions",
+    resume,
+  } = payload;
   if (!prompt || !cwd) {
     emit({ type: "quay_error", error: "payload requires { prompt, cwd }" });
     process.exit(1);
     return;
   }
 
-  emit({ type: "quay_start", cwd, model: model ?? null });
+  emit({ type: "quay_start", cwd, model: model ?? null, resumed: !!resume });
 
   try {
     for await (const message of query({
@@ -37,6 +49,7 @@ async function main() {
       options: {
         cwd,
         ...(model ? { model } : {}),
+        ...(resume ? { resume } : {}),
         permissionMode,
         maxTurns,
       },

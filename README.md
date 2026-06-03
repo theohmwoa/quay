@@ -104,14 +104,15 @@ bound to a **Claude session id** (`--session-id`), persisted and **resumed**
 (`--resume`) on relaunch so it drops back into the same conversation. The deck
 (repo, base, open sessions) **persists across app restarts**.
 
-**Agent mode (Agent SDK).** A more powerful alternative to the CLI terminal:
-give a worktree's agent a task and the **Claude Agent SDK** runs it
-autonomously, streamed as a **structured feed** — assistant messages, each tool
-call (Read/Edit/Bash…), and a final result with turns + cost. Runs via a Node
-sidecar (`sidecar/agent-runner.mjs`); its feed survives view switches. The two
-modes are complementary: **CLI terminal = your subscription**, **Agent mode =
-API credits**. Agent runs need `ANTHROPIC_API_KEY`; building/testing never
-spends credits (the streaming layer is tested with a fake process).
+**Chat mode (Agent SDK).** A real, multi-turn **chat with Claude** in the
+selected worktree — the primary way to drive an agent (the CLI `claude` terminal
+stays available on the side). Each turn streams the agent's steps — assistant
+text, every tool call (Read/Edit/Bash…), and a final result with turns — and the
+next turn resumes the same Claude session. Runs via the **Claude Agent SDK**
+(Node sidecar `sidecar/agent-runner.mjs`), which authenticates through the
+logged-in `claude` CLI, so it uses your **Claude subscription** — no API key.
+The chat (and its event subscriptions) survives view switches. New agents open
+straight into a chat. Delete a worktree from the sidebar (hover → 🗑 → confirm).
 
 **Diff review.** Narrated branch-vs-base diff with intent clusters and risks;
 **syntax-highlighted** hunks, per-file navigation, and reviewer notes. A
@@ -127,7 +128,7 @@ interrogate the diff in natural language (Haiku).
 - Diff/timeline caching so views don't recompute on every visit.
 - Reattach replay (`pty_scrollback`) is wired in the backend; the frontend
   currently keeps PTYs alive in-process rather than replaying after a restart.
-- Agent mode resolves the sidecar relative to the executable (dev/`--no-bundle`);
+- Chat mode resolves the sidecar relative to the executable (dev/`--no-bundle`);
   bundling it as a Tauri resource for a packaged `.app` is a follow-up.
-- Agent runs keep going if stopped/closed mid-run only via the Stop button;
-  closing the worktree doesn't yet auto-stop a background agent.
+- Each chat turn spawns a fresh sidecar that resumes the session (simple +
+  correct); a single long-lived streaming-input process is a latency follow-up.
