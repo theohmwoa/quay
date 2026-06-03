@@ -4,7 +4,7 @@
 
 import { basename } from "./format";
 
-export type View = "terminal" | "diff" | "timeline" | "ask";
+export type View = "terminal" | "agent" | "diff" | "timeline" | "ask";
 export type Program = "shell" | "claude";
 
 /** A live terminal: one PTY per (worktree path, program). */

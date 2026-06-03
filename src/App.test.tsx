@@ -46,6 +46,10 @@ vi.mock("./lib/api", () => ({
   commitWorktree: vi.fn(),
   pushBranch: vi.fn(),
   openPr: vi.fn(),
+  agentStart: vi.fn(),
+  agentStop: vi.fn(),
+  onAgentEvent: vi.fn().mockResolvedValue(() => {}),
+  onAgentExit: vi.fn().mockResolvedValue(() => {}),
 }));
 
 import App from "./App";

@@ -97,10 +97,21 @@ the branch — merge it into base (with conflict detection) and remove the
 worktree. Conflicts are detected up front and the merge aborted cleanly.
 
 **Multi-terminal deck.** Open multiple terminals (shell or `claude`) per
-worktree as **tabs**; every PTY stays alive when you switch — never resets a
-running Claude. **Split** view shows two panes side by side. Each terminal has
-**scrollback search** (Cmd/Ctrl+F) and retains output for replay. The deck
+worktree as **tabs**; every PTY stays alive when you switch views or tabs —
+never resets a running Claude. **Split** view shows two panes side by side.
+Each terminal has **scrollback search** (Cmd/Ctrl+F). A `claude` terminal is
+bound to a **Claude session id** (`--session-id`), persisted and **resumed**
+(`--resume`) on relaunch so it drops back into the same conversation. The deck
 (repo, base, open sessions) **persists across app restarts**.
+
+**Agent mode (Agent SDK).** A more powerful alternative to the CLI terminal:
+give a worktree's agent a task and the **Claude Agent SDK** runs it
+autonomously, streamed as a **structured feed** — assistant messages, each tool
+call (Read/Edit/Bash…), and a final result with turns + cost. Runs via a Node
+sidecar (`sidecar/agent-runner.mjs`); its feed survives view switches. The two
+modes are complementary: **CLI terminal = your subscription**, **Agent mode =
+API credits**. Agent runs need `ANTHROPIC_API_KEY`; building/testing never
+spends credits (the streaming layer is tested with a fake process).
 
 **Diff review.** Narrated branch-vs-base diff with intent clusters and risks;
 **syntax-highlighted** hunks, per-file navigation, and reviewer notes. A
@@ -116,3 +127,7 @@ interrogate the diff in natural language (Haiku).
 - Diff/timeline caching so views don't recompute on every visit.
 - Reattach replay (`pty_scrollback`) is wired in the backend; the frontend
   currently keeps PTYs alive in-process rather than replaying after a restart.
+- Agent mode resolves the sidecar relative to the executable (dev/`--no-bundle`);
+  bundling it as a Tauri resource for a packaged `.app` is a follow-up.
+- Agent runs keep going if stopped/closed mid-run only via the Stop button;
+  closing the worktree doesn't yet auto-stop a background agent.

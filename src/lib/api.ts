@@ -205,3 +205,18 @@ export const loadState = () => invoke<PersistedState>("load_state");
 
 export const saveState = (state: PersistedState) =>
   invoke<void>("save_state", { state });
+
+// --- Agent SDK runs (structured, more powerful alternative to the CLI) ------
+
+export const agentStart = (cwd: string, prompt: string, model?: string) =>
+  invoke<string>("agent_start", { cwd, prompt, model: model ?? null });
+
+export const agentStop = (id: string) => invoke<void>("agent_stop", { id });
+
+/** Subscribe to an agent run's NDJSON event stream. */
+export const onAgentEvent = (id: string, cb: (line: string) => void): Promise<UnlistenFn> =>
+  listen<string>(`agent://event/${id}`, (e) => cb(e.payload));
+
+/** Subscribe to an agent run finishing. */
+export const onAgentExit = (id: string, cb: () => void): Promise<UnlistenFn> =>
+  listen(`agent://exit/${id}`, () => cb());

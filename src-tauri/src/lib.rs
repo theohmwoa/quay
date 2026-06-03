@@ -5,6 +5,7 @@
 //! them as commands. All real logic lives in the (unit-tested) core modules;
 //! the commands here are thin adapters that manage state and emit events.
 
+mod agent;
 mod error;
 mod git;
 mod narrate;
@@ -290,11 +291,65 @@ fn pty_kill(state: State<PtyManager>, id: String) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Agent SDK commands + manager (a more powerful alternative to the CLI
+// terminal: runs an agent via the Agent SDK and streams structured events).
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct AgentManager {
+    next_id: AtomicU64,
+    handles: Mutex<HashMap<String, agent::AgentHandle>>,
+}
+
+/// Start an agent run in `cwd` with `prompt`. Streams the SDK's NDJSON messages
+/// as `agent://event/<id>`; fires `agent://exit/<id>` when the run ends.
+#[tauri::command]
+fn agent_start(
+    app: AppHandle,
+    state: State<AgentManager>,
+    cwd: String,
+    prompt: String,
+    model: Option<String>,
+) -> Result<String> {
+    let (handle, rx) = agent::start(&prompt, Path::new(&cwd), model.as_deref())?;
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed).to_string();
+
+    let app_for_thread = app.clone();
+    let id_for_thread = id.clone();
+    std::thread::spawn(move || {
+        while let Ok(line) = rx.recv() {
+            let _ = app_for_thread.emit(&format!("agent://event/{id_for_thread}"), line);
+        }
+        let _ = app_for_thread.emit(&format!("agent://exit/{id_for_thread}"), ());
+    });
+
+    state
+        .handles
+        .lock()
+        .map_err(|_| QuayError::Pty("agent manager lock poisoned".into()))?
+        .insert(id.clone(), handle);
+    Ok(id)
+}
+
+#[tauri::command]
+fn agent_stop(state: State<AgentManager>, id: String) -> Result<()> {
+    let mut handles = state
+        .handles
+        .lock()
+        .map_err(|_| QuayError::Pty("agent manager lock poisoned".into()))?;
+    if let Some(mut handle) = handles.remove(&id) {
+        handle.kill()?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PtyManager::default())
+        .manage(AgentManager::default())
         .invoke_handler(tauri::generate_handler![
             list_worktrees,
             create_worktree,
@@ -318,6 +373,8 @@ pub fn run() {
             pty_scrollback,
             pty_status,
             pty_kill,
+            agent_start,
+            agent_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

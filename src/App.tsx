@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  agentStart,
+  agentStop,
+  askDiff,
   commitTimeline,
   commitWorktree,
   createWorktree,
@@ -8,13 +11,14 @@ import {
   listWorktrees,
   loadState,
   narrateDiff,
+  onAgentEvent,
+  onAgentExit,
   openPr,
   pushBranch,
   removeWorktree,
   saveState,
   suggestCommitMessage,
   worktreeStatus,
-  askDiff,
   type DiffSummary,
   type Narration,
   type TimelineEntry,
@@ -27,9 +31,11 @@ import { TerminalDeck } from "./components/TerminalDeck";
 import { LandPanel } from "./components/LandPanel";
 import { DiffTimeline } from "./components/DiffTimeline";
 import { AskPanel } from "./components/AskPanel";
+import { AgentRunPanel } from "./components/AgentRunPanel";
+import { summarizeAgentEvent, type AgentRun } from "./lib/agent";
 import { sessionKey, upsertSession, type Program, type Session, type View } from "./lib/sessions";
 
-const VIEWS: View[] = ["terminal", "diff", "timeline", "ask"];
+const VIEWS: View[] = ["terminal", "agent", "diff", "timeline", "ask"];
 
 function App() {
   const [repoPath, setRepoPath] = useState("");
@@ -58,6 +64,11 @@ function App() {
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
   const loadedRef = useRef(false);
+
+  // Agent SDK runs, keyed by worktree path. Owned here so the live feed and
+  // its event subscriptions survive view switches (App never unmounts).
+  const [agentRuns, setAgentRuns] = useState<Record<string, AgentRun>>({});
+  const agentUnlisteners = useRef<Record<string, Array<() => void>>>({});
 
   const selectedWorktree = worktrees.find((w) => w.path === selectedPath) ?? null;
   const selectedStatus = selectedPath ? statuses[selectedPath] ?? null : null;
@@ -296,6 +307,46 @@ function App() {
     setSelectedPath(null);
   };
 
+  // --- agent runs (SDK) ----------------------------------------------------
+  const startAgent = async (path: string, task: string) => {
+    if (!task.trim()) return;
+    agentUnlisteners.current[path]?.forEach((u) => u());
+    agentUnlisteners.current[path] = [];
+    setAgentRuns((r) => ({ ...r, [path]: { id: null, task, events: [], running: true } }));
+    try {
+      const id = await agentStart(path, task);
+      setAgentRuns((r) => {
+        const cur = r[path] ?? { id: null, task, events: [], running: true };
+        return { ...r, [path]: { ...cur, id } };
+      });
+      const un1 = await onAgentEvent(id, (line) => {
+        const evs = summarizeAgentEvent(line);
+        if (!evs.length) return;
+        setAgentRuns((r) => {
+          const cur = r[path];
+          return cur ? { ...r, [path]: { ...cur, events: [...cur.events, ...evs] } } : r;
+        });
+      });
+      const un2 = await onAgentExit(id, () => {
+        setAgentRuns((r) => (r[path] ? { ...r, [path]: { ...r[path], running: false } } : r));
+      });
+      agentUnlisteners.current[path] = [un1, un2];
+    } catch (e) {
+      setAgentRuns((r) => ({
+        ...r,
+        [path]: { id: null, task, events: [{ kind: "error", text: String(e) }], running: false },
+      }));
+    }
+  };
+
+  const stopAgent = (path: string) => {
+    const run = agentRuns[path];
+    if (run?.id) void agentStop(run.id);
+    agentUnlisteners.current[path]?.forEach((u) => u());
+    agentUnlisteners.current[path] = [];
+    setAgentRuns((r) => (r[path] ? { ...r, [path]: { ...r[path], running: false } } : r));
+  };
+
   return (
     <div className="relative flex h-full flex-col bg-[var(--color-bg)] text-[var(--color-fg)]">
       <header className="flex items-center gap-3 border-b border-[var(--color-border)] px-3 py-2">
@@ -424,6 +475,13 @@ function App() {
                     </div>
                   ) : view === "timeline" ? (
                     <DiffTimeline entries={timeline} />
+                  ) : view === "agent" ? (
+                    <AgentRunPanel
+                      run={agentRuns[selectedPath]}
+                      busy={busy}
+                      onStart={(t) => void startAgent(selectedPath, t)}
+                      onStop={() => stopAgent(selectedPath)}
+                    />
                   ) : (
                     <AskPanel ask={(q) => askDiff(selectedPath, base, q)} />
                   )}
