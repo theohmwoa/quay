@@ -73,7 +73,7 @@ pure, separately tested functions.
 
 ```sh
 pnpm install
-pnpm tauri dev        # run the app
+pnpm tauri dev        # run the app in development mode
 ```
 
 ## Test & verify
@@ -133,3 +133,8 @@ interrogate the diff in natural language (Haiku).
   bundling it as a Tauri resource for a packaged `.app` is a follow-up.
 - Each chat turn spawns a fresh sidecar that resumes the session (simple +
   correct); a single long-lived streaming-input process is a latency follow-up.
+
+---
+
+> The quick brown fox jumps over the lazy dog while a curious cat watches from
+> the quay, sipping coffee and contemplating the gentle hum of distant ships.
