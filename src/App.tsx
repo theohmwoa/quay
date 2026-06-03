@@ -354,53 +354,69 @@ function App() {
         <main className="relative min-w-0 flex-1">
           {!repoPath ? (
             <Empty>Set a repository path above to begin.</Empty>
-          ) : view === "terminal" ? (
-            <TerminalDeck
-              sessions={sessions}
-              activeKey={activeKey}
-              onActivate={activateSession}
-              onClose={closeSession}
-              onNew={(p) => selectedPath && openSession(selectedPath, p)}
-              canOpen={!!selectedPath}
-              visible={view === "terminal"}
-              modalOpen={showNew}
-            />
-          ) : !selectedPath ? (
-            <Empty>Select an agent in the deck.</Empty>
-          ) : view === "diff" ? (
-            <div className="flex h-full flex-col">
-              <LandPanel
-                status={selectedStatus}
-                busy={busy}
-                message={commitMessage}
-                onMessageChange={setCommitMessage}
-                onSuggest={onSuggest}
-                onCommit={onCommit}
-                onPush={onPush}
-                onOpenPr={onOpenPr}
-                onLand={onLand}
-                onDiscard={onDiscard}
-                notice={notice}
-              />
-              <div className="min-h-0 flex-1">
-                {diffLoading ? (
-                  <Empty>Computing diff against {base}…</Empty>
-                ) : diff && narration ? (
-                  <NarratedDiff
-                    diff={diff}
-                    narration={narration}
-                    notes={notes}
-                    onNote={(path, note) => setNotes((n) => ({ ...n, [path]: note }))}
-                  />
-                ) : (
-                  <Empty>No diff to show.</Empty>
-                )}
-              </div>
-            </div>
-          ) : view === "timeline" ? (
-            <DiffTimeline entries={timeline} />
           ) : (
-            <AskPanel ask={(q) => askDiff(selectedPath, base, q)} />
+            <>
+              {/* TerminalDeck is ALWAYS mounted (hidden when not the active
+                  view) so PTYs — and running Claude agents — survive switching
+                  to the diff/timeline/ask views and back. */}
+              <div
+                className="absolute inset-0"
+                style={{ display: view === "terminal" ? "block" : "none" }}
+              >
+                <TerminalDeck
+                  sessions={sessions}
+                  activeKey={activeKey}
+                  onActivate={activateSession}
+                  onClose={closeSession}
+                  onNew={(p) => selectedPath && openSession(selectedPath, p)}
+                  canOpen={!!selectedPath}
+                  visible={view === "terminal"}
+                  modalOpen={showNew}
+                />
+              </div>
+
+              {view !== "terminal" && (
+                <div className="absolute inset-0">
+                  {!selectedPath ? (
+                    <Empty>Select an agent in the deck.</Empty>
+                  ) : view === "diff" ? (
+                    <div className="flex h-full flex-col">
+                      <LandPanel
+                        status={selectedStatus}
+                        busy={busy}
+                        message={commitMessage}
+                        onMessageChange={setCommitMessage}
+                        onSuggest={onSuggest}
+                        onCommit={onCommit}
+                        onPush={onPush}
+                        onOpenPr={onOpenPr}
+                        onLand={onLand}
+                        onDiscard={onDiscard}
+                        notice={notice}
+                      />
+                      <div className="min-h-0 flex-1">
+                        {diffLoading ? (
+                          <Empty>Computing diff against {base}…</Empty>
+                        ) : diff && narration ? (
+                          <NarratedDiff
+                            diff={diff}
+                            narration={narration}
+                            notes={notes}
+                            onNote={(path, note) => setNotes((n) => ({ ...n, [path]: note }))}
+                          />
+                        ) : (
+                          <Empty>No diff to show.</Empty>
+                        )}
+                      </div>
+                    </div>
+                  ) : view === "timeline" ? (
+                    <DiffTimeline entries={timeline} />
+                  ) : (
+                    <AskPanel ask={(q) => askDiff(selectedPath, base, q)} />
+                  )}
+                </div>
+              )}
+            </>
           )}
         </main>
       </div>
