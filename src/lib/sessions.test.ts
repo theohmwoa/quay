@@ -2,10 +2,36 @@ import { describe, it, expect } from "vitest";
 import {
   sessionKey,
   commandFor,
+  programArgs,
   upsertSession,
   isSessionActive,
   type Session,
 } from "./sessions";
+
+describe("programArgs", () => {
+  it("shell sessions take no args", () => {
+    expect(programArgs({ path: "/r/wt", program: "shell" })).toEqual([]);
+  });
+
+  it("a fresh claude session creates a specific session id and name", () => {
+    const args = programArgs({ path: "/r/feat-x", program: "claude", claudeSessionId: "abc-123" });
+    expect(args).toEqual(["--session-id", "abc-123", "--name", "feat-x"]);
+  });
+
+  it("a restored claude session resumes that id", () => {
+    const args = programArgs({
+      path: "/r/feat-x",
+      program: "claude",
+      claudeSessionId: "abc-123",
+      resume: true,
+    });
+    expect(args).toEqual(["--resume", "abc-123"]);
+  });
+
+  it("claude without a bound id falls back to no args", () => {
+    expect(programArgs({ path: "/r/wt", program: "claude" })).toEqual([]);
+  });
+});
 
 describe("sessionKey / commandFor", () => {
   it("keys are stable and distinguish program per path", () => {

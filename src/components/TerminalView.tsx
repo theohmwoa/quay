@@ -19,7 +19,9 @@ interface Props {
   args: string[];
   /** Stable key; one PTY exists per session for its whole lifetime. */
   sessionKey: string;
-  /** Accept input and hold focus only when active and unobstructed. */
+  /** Laid out on screen (vs hidden) — drives re-fit/resize. */
+  visible: boolean;
+  /** Accept input and hold focus (only the active, unobstructed pane). */
   interactive: boolean;
 }
 
@@ -35,20 +37,34 @@ const THEME = {
 /**
  * A live terminal bound to a PTY. The PTY is spawned once per `sessionKey` and
  * kept alive across view/program/worktree switches (the parent hides rather
- * than unmounts it). Includes an in-terminal scrollback search (Cmd/Ctrl+F).
+ * than unmounts it). Re-fits whenever it becomes visible so hidden/split panes
+ * never keep a stale size. Includes scrollback search (Cmd/Ctrl+F).
  */
-export function TerminalView({ cwd, command, args, sessionKey, interactive }: Props) {
+export function TerminalView({ cwd, command, args, sessionKey, visible, interactive }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
+  const ptyIdRef = useRef<string | null>(null);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
 
+  // Fit to the container and tell the PTY the new size. Safe to call when the
+  // element isn't measurable (hidden) — it just no-ops.
+  const refit = () => {
+    const term = termRef.current;
+    if (!term) return;
+    try {
+      fitRef.current?.fit();
+      if (ptyIdRef.current) void ptyResize(ptyIdRef.current, term.cols, term.rows);
+    } catch {
+      /* not measurable yet */
+    }
+  };
+
   useEffect(() => {
     let disposed = false;
-    let ptyId: string | null = null;
     const unlisteners: UnlistenFn[] = [];
 
     const term = new Terminal({
@@ -67,7 +83,6 @@ export function TerminalView({ cwd, command, args, sessionKey, interactive }: Pr
     fitRef.current = fit;
     searchRef.current = search;
 
-    // Intercept Cmd/Ctrl+F to open our search bar instead of the browser's.
     term.attachCustomKeyEventHandler((e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
         if (e.type === "keydown") setSearchOpen(true);
@@ -93,7 +108,7 @@ export function TerminalView({ cwd, command, args, sessionKey, interactive }: Pr
           void ptyKill(id);
           return;
         }
-        ptyId = id;
+        ptyIdRef.current = id;
         unlisteners.push(await onPtyOutput(id, (chunk) => term.write(chunk)));
         unlisteners.push(
           await onPtyExit(id, () => {
@@ -108,22 +123,15 @@ export function TerminalView({ cwd, command, args, sessionKey, interactive }: Pr
       }
     })();
 
-    const onResize = () => {
-      try {
-        fit.fit();
-        if (ptyId) void ptyResize(ptyId, term.cols, term.rows);
-      } catch {
-        /* container not measurable (e.g. hidden) */
-      }
-    };
-    const ro = new ResizeObserver(onResize);
+    const ro = new ResizeObserver(() => refit());
     if (el) ro.observe(el);
 
     return () => {
       disposed = true;
       ro.disconnect();
       unlisteners.forEach((u) => u());
-      if (ptyId) void ptyKill(ptyId);
+      if (ptyIdRef.current) void ptyKill(ptyIdRef.current);
+      ptyIdRef.current = null;
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -132,22 +140,29 @@ export function TerminalView({ cwd, command, args, sessionKey, interactive }: Pr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
 
+  // Re-fit whenever the terminal becomes visible (it may have been hidden, so
+  // its size is stale). Covers split panes and restored sessions.
+  useEffect(() => {
+    if (!visible) return;
+    const id = requestAnimationFrame(() => refit());
+    return () => cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+
+  // Toggle input + focus based on whether this is the active, unobstructed pane.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
     term.options.disableStdin = !interactive;
     if (interactive) {
       requestAnimationFrame(() => {
-        try {
-          fitRef.current?.fit();
-        } catch {
-          /* not measurable */
-        }
+        refit();
         term.focus();
       });
     } else {
       term.blur();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactive]);
 
   const runSearch = (forward: boolean) => {

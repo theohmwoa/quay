@@ -16,6 +16,9 @@ use crate::error::{QuayError, Result};
 pub struct PersistedSession {
     pub path: String,
     pub program: String,
+    /// For claude sessions, the Claude session UUID to resume on relaunch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session_id: Option<String>,
 }
 
 /// The whole restorable deck state.
@@ -84,8 +87,16 @@ mod tests {
             repo_path: "/repo".into(),
             base: "main".into(),
             sessions: vec![
-                PersistedSession { path: "/repo/wt-a".into(), program: "claude".into() },
-                PersistedSession { path: "/repo/wt-b".into(), program: "shell".into() },
+                PersistedSession {
+                    path: "/repo/wt-a".into(),
+                    program: "claude".into(),
+                    claude_session_id: Some("11111111-2222-3333-4444-555555555555".into()),
+                },
+                PersistedSession {
+                    path: "/repo/wt-b".into(),
+                    program: "shell".into(),
+                    claude_session_id: None,
+                },
             ],
         }
     }

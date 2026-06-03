@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { TerminalView } from "./TerminalView";
 import { basename } from "../lib/format";
-import { commandFor, sessionKey, type Program, type Session } from "../lib/sessions";
+import { commandFor, programArgs, sessionKey, type Program, type Session } from "../lib/sessions";
 
 interface Props {
   sessions: Session[];
@@ -156,8 +156,9 @@ export function TerminalDeck({
               <TerminalView
                 cwd={s.path}
                 command={commandFor(s.program)}
-                args={EMPTY}
+                args={programArgs(s)}
                 sessionKey={key}
+                visible={slot !== "hidden"}
                 interactive={interactiveFor(slot)}
               />
             </div>
@@ -167,5 +168,3 @@ export function TerminalDeck({
     </div>
   );
 }
-
-const EMPTY: string[] = [];

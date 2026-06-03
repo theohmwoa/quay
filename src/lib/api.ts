@@ -192,6 +192,7 @@ export const askDiff = (repoPath: string, base: string, question: string) =>
 export interface PersistedSession {
   path: string;
   program: string;
+  claude_session_id?: string;
 }
 
 export interface PersistedState {

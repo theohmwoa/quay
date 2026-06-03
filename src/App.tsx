@@ -74,6 +74,9 @@ function App() {
         const restored = st.sessions.map((s) => ({
           path: s.path,
           program: s.program as Program,
+          claudeSessionId: s.claude_session_id,
+          // Restored claude sessions resume their conversation on relaunch.
+          resume: s.program === "claude" && !!s.claude_session_id,
         }));
         setSessions(restored);
         if (restored[0]) setActiveKey(sessionKey(restored[0].path, restored[0].program));
@@ -89,7 +92,11 @@ function App() {
     void saveState({
       repo_path: repoPath,
       base,
-      sessions: sessions.map((s) => ({ path: s.path, program: s.program })),
+      sessions: sessions.map((s) => ({
+        path: s.path,
+        program: s.program,
+        claude_session_id: s.claudeSessionId,
+      })),
     });
   }, [repoPath, base, sessions]);
 
@@ -157,7 +164,13 @@ function App() {
 
   // --- session / selection plumbing ----------------------------------------
   const openSession = (path: string, program: Program) => {
-    setSessions((prev) => upsertSession(prev, path, program));
+    // A new claude terminal gets a fresh Claude session id so it can be
+    // resumed later; shells need nothing extra.
+    const extra =
+      program === "claude"
+        ? { claudeSessionId: crypto.randomUUID(), resume: false }
+        : undefined;
+    setSessions((prev) => upsertSession(prev, path, program, extra));
     setActiveKey(sessionKey(path, program));
     setView("terminal");
   };
